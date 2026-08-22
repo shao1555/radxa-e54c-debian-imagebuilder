@@ -145,7 +145,12 @@ jobs:
         run: |
           docker run --rm --privileged \
             -v "$PWD":/ws -w /ws \
-            "${{ needs.devcontainer.outputs.image }}" make rootfs
+            "${{ needs.devcontainer.outputs.image }}" scripts/build-rootfs.sh
+
+      # キャッシュ復元・新規ビルドのどちらの経路でも回帰検査を通す
+      # (tar の listing 検査のみなのでコンテナ不要)
+      - name: Smoke test rootfs
+        run: scripts/smoke-test-rootfs.sh
 
       - name: Upload rootfs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

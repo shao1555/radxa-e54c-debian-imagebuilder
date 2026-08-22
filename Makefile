@@ -7,7 +7,7 @@
 # Makefile の VERSION (=7) を上書きして LINUX_VERSION_CODE を壊す (実際に踏んだ)
 IMG_VERSION ?= dev
 
-.PHONY: all kernel rootfs image clean distclean
+.PHONY: all kernel rootfs image check clean distclean
 
 all: kernel rootfs image
 
@@ -16,6 +16,11 @@ kernel:
 
 rootfs:
 	scripts/build-rootfs.sh
+	scripts/smoke-test-rootfs.sh
+
+# rootfs.tar の回帰検査のみ (ビルド環境不要)
+check:
+	scripts/smoke-test-rootfs.sh
 
 image:
 	VERSION=$(IMG_VERSION) scripts/build-image.sh
