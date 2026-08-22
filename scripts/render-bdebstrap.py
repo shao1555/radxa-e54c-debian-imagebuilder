@@ -57,6 +57,10 @@ customize_hooks = [
     f'echo "127.0.1.1\t{cfg["image"]["hostname"]}" >> "$1/etc/hosts"',
     # 自作フック (chroot 外から $1 を渡して実行)
     f'for h in "{TOP}"/hooks/customize.d/*.sh; do [ -e "$h" ] && bash "$h" "$1"; done',
+    # systemd-networkd の有効化。Debian は既定で enable しないため、
+    # files/etc/systemd/network/*.network はこれが無いと一切機能しない
+    # (= 初回起動時に lan1 が DHCP せず SSH 到達不能になる)
+    'chroot "$1" systemctl enable systemd-networkd.service systemd-networkd.socket',
     # ブート用カーネル引数。root= は build-image.sh がイメージ作成時に UUID を注入する。
     # u-boot-update が /etc/kernel/cmdline を参照するよう /etc/default/u-boot を配線して
     # おくことで、実機での以後のカーネル更新でも root= が維持される
