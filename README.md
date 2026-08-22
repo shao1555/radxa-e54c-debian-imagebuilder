@@ -69,7 +69,10 @@ CI は **devcontainer / kernel / rootfs / image / release の 5 ジョブ**の�
 - **rootfs**: 入力ハッシュ + **日付**でキャッシュ(日次ローテ)。同日の再 push は
   スキップされるが、翌日は必ず fresh な apt 状態で作り直す
   (永続キャッシュにすると Debian のセキュリティ更新が取り込まれなくなるため)
-- **image**: guestfish によるイメージ組み立て(rootfs.tar のみを入力に取る)
+- **image**: guestfish によるイメージ組み立て(rootfs.tar のみを入力に取る)。
+  このジョブだけ **x64 ランナー**: GitHub の x64 は KVM が使えるため、libguestfs の
+  アプライアンスが TCG(arm64 ランナー)より大幅に速い。アプライアンスの仕事は
+  ファイルシステム操作のみなので、x86_64 アプライアンスで arm64 イメージを扱える
 - **release**: リリース作成のみの最小権限ジョブ。ここだけの失敗は re-run で復旧可
 - 権限も最小化: GHCR へ push するのは devcontainer ジョブのみ(packages: write)。
   下流は pull のみ(packages: read)、release は contents: write のみ

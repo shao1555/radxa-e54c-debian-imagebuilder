@@ -163,12 +163,14 @@ jobs:
             out/rootfs/bdebstrap.yaml
           if-no-files-found: error
 
-  # ステージ 3: イメージ組み立て (guestfish)。rootfs.tar だけを入力に取る
+  # ステージ 3: イメージ組み立て (guestfish)。rootfs.tar だけを入力に取る。
+  # このジョブだけ x64 ランナー: GitHub の x64 ランナーは KVM (nested virt) が
+  # 使えるため、libguestfs のアプライアンスが TCG (arm64 ランナー、~7.5 分) では
+  # なく KVM で走る。アプライアンスはホストアーキで起動し、行うのはファイル
+  # システム操作のみなので、x86_64 アプライアンスで arm64 イメージを扱ってよい
   image:
-    needs: [devcontainer, rootfs]
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      packages: read
+    needs: rootfs
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
@@ -180,12 +182,18 @@ jobs:
           name: rootfs
           path: out/rootfs/build
 
-      - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Enable KVM and install tools
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libguestfs-tools gdisk parted python3-yaml xz-utils
+          # libguestfs のアプライアンスがホストカーネルを読めるようにする
+          sudo chmod +r /boot/vmlinuz-*
+          ls -la /dev/kvm || echo "WARN: /dev/kvm 不在 → TCG にフォールバック"
 
       - name: Generate version (CalVer, JST)
         id: ver
@@ -193,10 +201,8 @@ jobs:
 
       - name: Build image
         run: |
-          docker run --rm --privileged \
-            -v "$PWD":/ws -w /ws \
-            "${{ needs.devcontainer.outputs.image }}" \
-            bash -c 'make image VERSION=${{ steps.ver.outputs.version }} && cd out && sha512sum *.img.xz > SHA512SUMS'
+          make image VERSION=${{ steps.ver.outputs.version }}
+          cd out && sha512sum *.img.xz > SHA512SUMS
 
       - name: Upload image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
