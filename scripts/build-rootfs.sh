@@ -39,6 +39,32 @@ if [[ "$DEFAULT_PASSWORD" == *$'\n'* || "$DEFAULT_PASSWORD" == *$'\r'* ]]; then
 fi
 export DEFAULT_PASSWORD
 
+# カーネル deb と E54C の DTB の存在を事前検証する。無いまま進めると
+# 「正常に生成されたが起動不能な rootfs」ができてしまう。
+# 投入フックは linux-image-*.deb を全部コピーするため、検証対象と投入対象が
+# 一致するよう「非 dbg の image deb は正確に 1 個」を要求する
+mapfile -t img_debs < <(ls "$TOP"/out/debs/linux-image-*.deb 2> /dev/null | grep -v -- -dbg || true)
+if (( ${#img_debs[@]} != 1 )); then
+	echo "エラー: 非 dbg の linux-image deb は正確に 1 個であるべき (現在 ${#img_debs[@]} 個)。" >&2
+	echo "  'make kernel' を実行するか、out/debs/ の古い deb を掃除すること" >&2
+	exit 1
+fi
+img_deb="${img_debs[0]}"
+mapfile -t hdr_debs < <(ls "$TOP"/out/debs/linux-headers-*.deb 2> /dev/null || true)
+if (( ${#hdr_debs[@]} != 1 )); then
+	echo "エラー: linux-headers deb は正確に 1 個であるべき (現在 ${#hdr_debs[@]} 個)" >&2
+	exit 1
+fi
+# grep -q をパイプに直結すると SIGPIPE で dpkg-deb が失敗扱いになる
+# (pipefail の罠) ため、listing を変数に受けてから照合する。
+# DTB は起動時に参照される正規の配置場所までパスで固定して確認する
+deb_listing="$(dpkg-deb --fsys-tarfile "$img_deb" | tar -t)"
+if ! grep -qE '^\./usr/lib/linux-image-[^/]+/rockchip/rk3582-radxa-e54c\.dtb$' <<< "$deb_listing"; then
+	echo "エラー: $img_deb に E54C の DTB (usr/lib/linux-image-*/rockchip/) が同梱されていない" >&2
+	exit 1
+fi
+echo "kernel deb preflight passed: $(basename "$img_deb")"
+
 python3 scripts/render-bdebstrap.py "$OUT"
 
 # Radxa の APT 鍵 (U-Boot deb の取得に必要) をホスト側 keyring から拾えるよう準備
