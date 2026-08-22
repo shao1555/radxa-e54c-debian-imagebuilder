@@ -58,6 +58,14 @@ npm exec -- @devcontainers/cli exec --workspace-folder . make
 main への push で CalVer タグ(`vYYYY.MM.DD-HHMM`、JST)の Release に
 イメージ・SHA512・manifest・bdebstrap.yaml(ビルドの完全な記録)が公開される。
 
+CI は **kernel / image / release の 3 ジョブ**のパイプライン:
+
+- **kernel**: 入力(config.yaml / kernel/ / build script)のハッシュでキャッシュされ、
+  変更が無ければ数秒でスキップ。ミス時も ccache で再コンパイルを短縮
+- **image**: rootfs 構築 + イメージ組み立て(間を流れる rootfs.tar が大きいため一体)
+- **release**: リリース作成のみの最小権限ジョブ。ここだけの失敗は re-run で復旧可
+- devcontainer イメージは GHCR にキャッシュされ、2 回目以降は pull のみ
+
 ## 設計上の前提と注意
 
 - **カーネル**: mainline 7.3 以降を想定(E54C の DTS 上流化と、DSA スイッチが必要とする

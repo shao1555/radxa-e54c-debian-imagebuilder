@@ -4,10 +4,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write
-  packages: write
-
 # 連続 push 時は古いビルドをキャンセルして最新だけ走らせる
 concurrency:
   group: build-release
@@ -16,23 +12,30 @@ concurrency:
 env:
   DEVCONTAINER_IMAGE: ghcr.io/${{ github.repository }}/devcontainer
 
+# arm64 ランナー (パブリックリポジトリでは無料) でネイティブビルドする。
+# amd64 ランナーに戻す場合は ubuntu-latest + docker/setup-qemu-action を復活させること
+
 jobs:
-  build:
-    # arm64 ランナー (パブリックリポジトリでは無料)。QEMU 不要のネイティブビルド。
-    # amd64 ランナーに戻す場合は ubuntu-latest + docker/setup-qemu-action を復活させること
+  # ステージ 1: カーネル deb。入力 (config.yaml / kernel/ / build script) が
+  # 変わらなければキャッシュ復元だけで数秒で終わる
+  kernel:
     runs-on: ubuntu-24.04-arm
+    permissions:
+      packages: write
+    outputs:
+      cache-hit: ${{ steps.debs.outputs.cache-hit }}
     steps:
       - uses: actions/checkout@v4
 
-      # --- キャッシュ 1: カーネル deb (入力が変わらなければビルド丸ごとスキップ) ---
       - name: Restore kernel debs
+        id: debs
         uses: actions/cache@v4
         with:
           path: out/debs
           key: kernel-debs-${{ runner.arch }}-${{ hashFiles('config.yaml', 'kernel/**', 'scripts/build-kernel.sh') }}
 
-      # --- キャッシュ 2: ccache (カーネル入力が変わったときの再コンパイル短縮) ---
       - name: Restore ccache
+        if: steps.debs.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: out/ccache
@@ -40,7 +43,51 @@ jobs:
           restore-keys: |
             ccache-${{ runner.arch }}-
 
-      # --- キャッシュ 3: devcontainer イメージ (GHCR に push して次回以降 pull) ---
+      - name: Log in to GHCR
+        if: steps.debs.outputs.cache-hit != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build kernel within devcontainer
+        if: steps.debs.outputs.cache-hit != 'true'
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: ${{ env.DEVCONTAINER_IMAGE }}
+          cacheFrom: ${{ env.DEVCONTAINER_IMAGE }}
+          push: always
+          runCmd: |
+            set -euo pipefail
+            export CCACHE_DIR="$PWD/out/ccache"
+            make kernel
+
+      - name: Upload kernel debs
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-debs
+          path: out/debs/*.deb
+          if-no-files-found: error
+
+  # ステージ 2: rootfs 構築 + イメージ組み立て。
+  # (間を流れる rootfs.tar が ~750MB あるため、この 2 つは分割しない)
+  image:
+    needs: kernel
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      packages: write
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download kernel debs
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-debs
+          path: out/debs
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -52,8 +99,7 @@ jobs:
         id: ver
         run: echo "version=$(TZ=Asia/Tokyo date +v%Y.%m.%d-%H%M)" >> "$GITHUB_OUTPUT"
 
-      # ローカル開発と同一の devcontainer 内でビルドする (環境の一致を保証)
-      - name: Build within devcontainer
+      - name: Build rootfs and image within devcontainer
         uses: devcontainers/ci@v0.3
         with:
           imageName: ${{ env.DEVCONTAINER_IMAGE }}
@@ -61,14 +107,39 @@ jobs:
           push: always
           runCmd: |
             set -euo pipefail
-            export CCACHE_DIR="$PWD/out/ccache"
-            make ci VERSION=${{ steps.ver.outputs.version }}
+            make rootfs
+            make image VERSION=${{ steps.ver.outputs.version }}
             cd out && sha512sum *.img.xz > SHA512SUMS
+
+      - name: Upload image artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: |
+            out/*.img.xz
+            out/SHA512SUMS
+            out/rootfs/build/manifest
+            out/rootfs/bdebstrap.yaml
+          if-no-files-found: error
+
+  # ステージ 3: リリース作成のみ (devcontainer 不要・最小権限)。
+  # ここだけ失敗した場合は release ジョブの re-run で済む
+  release:
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download image artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: out
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.version }}
+          tag_name: ${{ needs.image.outputs.version }}
           files: |
             out/*.img.xz
             out/SHA512SUMS
