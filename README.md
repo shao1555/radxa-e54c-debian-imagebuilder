@@ -68,7 +68,10 @@ CI は **devcontainer / kernel / rootfs / image / release の 5 ジョブ**の�
   変更が無ければ数秒でスキップ。ミス時も ccache で再コンパイルを短縮
 - **rootfs**: 入力ハッシュ + **日付**でキャッシュ(日次ローテ)。同日の再 push は
   スキップされるが、翌日は必ず fresh な apt 状態で作り直す
-  (永続キャッシュにすると Debian のセキュリティ更新が取り込まれなくなるため)
+  (永続キャッシュにすると Debian のセキュリティ更新が取り込まれなくなるため)。
+  ビルド・キャッシュ復元のどちらの経路でも **smoke test**
+  (`scripts/smoke-test-rootfs.sh`、networkd/resolved の enable・resolv.conf・
+  カーネル/DTB/extlinux・incus/k3s 等 19 項目)が走る。ローカルは `make check`
 - **image**: guestfish によるイメージ組み立て(rootfs.tar のみを入力に取る)。
   このジョブだけ **x64 ランナー**: GitHub の x64 は KVM が使えるため、libguestfs の
   アプライアンスが TCG(arm64 ランナー)より大幅に速い。アプライアンスの仕事は
