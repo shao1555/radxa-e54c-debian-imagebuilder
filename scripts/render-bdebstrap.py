@@ -57,6 +57,10 @@ customize_hooks = [
     f'echo "127.0.1.1\t{cfg["image"]["hostname"]}" >> "$1/etc/hosts"',
     # 自作フック (chroot 外から $1 を渡して実行)
     f'for h in "{TOP}"/hooks/customize.d/*.sh; do [ -e "$h" ] && bash "$h" "$1"; done',
+    # systemd-networkd の有効化。Debian は既定で enable しないため、
+    # files/etc/systemd/network/*.network はこれが無いと一切機能しない
+    # (= 初回起動時に lan1 が DHCP せず SSH 到達不能になる)
+    'chroot "$1" systemctl enable systemd-networkd.service systemd-networkd.socket',
     # ブート用カーネル引数。root= は build-image.sh がイメージ作成時に UUID を注入する。
     # u-boot-update が /etc/kernel/cmdline を参照するよう /etc/default/u-boot を配線して
     # おくことで、実機での以後のカーネル更新でも root= が維持される
@@ -86,7 +90,12 @@ config = {
         "setup-hooks": setup_hooks,
         "customize-hooks": customize_hooks,
         "cleanup-hooks": [
-            'rm -f "$1/etc/resolv.conf"',
+            # ビルドホストの DNS 設定 (mmdebstrap が入れる resolv.conf と、
+            # systemd-resolved postinst が退避した .bak) を除去し、resolved の
+            # stub への symlink に置き換える。単に削除するだけだと初回起動時に
+            # glibc が /etc/resolv.conf を見つけられず DNS 解決が壊れる
+            'rm -f "$1/etc/resolv.conf" "$1/etc/.resolv.conf.systemd-resolved.bak"',
+            'ln -s ../run/systemd/resolve/stub-resolv.conf "$1/etc/resolv.conf"',
             'rm -rf "$1/var/lib/apt/lists"/*',
             'rm -f "$1/etc/machine-id" "$1/var/lib/dbus/machine-id"',
         ],
