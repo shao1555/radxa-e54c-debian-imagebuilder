@@ -111,6 +111,9 @@ CI は **devcontainer / kernel / rootfs / image / release の 5 ジョブ**の�
   incus launch images:openwrt/24.10 router
   incus config device add router wan nic nictype=physical parent=wan
   ```
+- **初回起動時の容量拡張**: rootfs パーティションは `cloud-initramfs-growroot` が
+  initramfs 内で、ファイルシステムは fstab の `x-systemd.growfs` が起動時に
+  メディアの残容量まで拡張する(配布イメージは最小サイズまで縮小されている)
 - **eMMC 搭載個体**: BootROM は SPI → eMMC → SD の順にブートするため、eMMC に
   OS が入っている個体では SD が無視される。必要なら Radxa 公式手順で eMMC を消去する
 - **状態**(macOS + Docker の devcontainer で検証済み):
