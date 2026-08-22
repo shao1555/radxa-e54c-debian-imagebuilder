@@ -123,7 +123,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: out/rootfs
-          key: rootfs-${{ runner.arch }}-${{ steps.date.outputs.date }}-${{ hashFiles('config.yaml', 'packages.txt', 'files/**', 'hooks/**', 'kernel/**', 'scripts/build-kernel.sh', 'scripts/build-rootfs.sh', 'scripts/render-bdebstrap.py') }}
+          # workflow 自体もキーに含める (DEFAULT_PASSWORD 等、この場で決まる
+          # 入力の変更で古い rootfs キャッシュが再利用されるのを防ぐ)
+          key: rootfs-${{ runner.arch }}-${{ steps.date.outputs.date }}-${{ hashFiles('config.yaml', 'packages.txt', 'files/**', 'hooks/**', 'kernel/**', 'scripts/build-kernel.sh', 'scripts/build-rootfs.sh', 'scripts/render-bdebstrap.py', '.github/workflows/release.yml') }}
 
       - name: Download kernel debs
         if: steps.rootfs.outputs.cache-hit != 'true'
@@ -142,9 +144,12 @@ jobs:
 
       - name: Build rootfs
         if: steps.rootfs.outputs.cache-hit != 'true'
+        # リリースイメージのデフォルトユーザーは debian / debian (公開値)。
+        # SSH ホスト鍵はビルド時に除去され、各端末の初回起動時に生成される
         run: |
           docker run --rm --privileged \
             -v "$PWD":/ws -w /ws \
+            -e DEFAULT_PASSWORD=debian \
             "${{ needs.devcontainer.outputs.image }}" scripts/build-rootfs.sh
 
       # キャッシュ復元・新規ビルドのどちらの経路でも回帰検査を通す

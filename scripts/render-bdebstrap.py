@@ -57,6 +57,19 @@ customize_hooks = [
     f'echo "127.0.1.1\t{cfg["image"]["hostname"]}" >> "$1/etc/hosts"',
     # 自作フック (chroot 外から $1 を渡して実行)
     f'for h in "{TOP}"/hooks/customize.d/*.sh; do [ -e "$h" ] && bash "$h" "$1"; done',
+    # デフォルトユーザーの作成。パスワードは bdebstrap.yaml (リリースに同梱される)
+    # に値を埋め込まず、フック実行時の環境変数 $DEFAULT_PASSWORD を参照する
+    # (build-rootfs.sh が未設定を検知して早期に失敗させる)
+    'chroot "$1" useradd -m -s /bin/bash -G sudo debian',
+    # dash の echo は \n 等を解釈してしまうため、固定書式の printf を使う
+    # (CR/LF を含む値は build-rootfs.sh が事前拒否する)
+    'printf \'%s:%s\\n\' debian "$DEFAULT_PASSWORD" | chroot "$1" chpasswd',
+    # 初期パスワードは周知の値 (リリースでは debian) のため、初回ログイン時に
+    # 変更を強制して既知パスワードのまま運用され続けるのを防ぐ
+    'chroot "$1" chage -d 0 debian',
+    # SSH ホスト鍵の初回起動生成は trixie 標準の sshd-keygen.service に任せる
+    # (ConditionFirstBoot=yes。machine-id を cleanup で消すため初回起動で発動する。
+    #  独自 unit を足すと並列実行の競合になるため追加してはいけない)
     # systemd-networkd の有効化。Debian は既定で enable しないため、
     # files/etc/systemd/network/*.network はこれが無いと一切機能しない
     # (= 初回起動時に lan1 が DHCP せず SSH 到達不能になる)
@@ -94,6 +107,10 @@ config = {
             # systemd-resolved postinst が退避した .bak) を除去し、resolved の
             # stub への symlink に置き換える。単に削除するだけだと初回起動時に
             # glibc が /etc/resolv.conf を見つけられず DNS 解決が壊れる
+            # ビルド時に生成された SSH ホスト鍵を削除する。焼き込むと全端末が
+            # 同一のサーバー鍵を共有してしまう。初回起動時に trixie 標準の
+            # sshd-keygen.service が端末固有の鍵を生成する
+            'rm -f "$1/etc/ssh/ssh_host_"*',
             'rm -f "$1/etc/resolv.conf" "$1/etc/.resolv.conf.systemd-resolved.bak"',
             'ln -s ../run/systemd/resolve/stub-resolv.conf "$1/etc/resolv.conf"',
             'rm -rf "$1/var/lib/apt/lists"/*',
