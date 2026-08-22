@@ -46,13 +46,21 @@ setup_hooks = [
 
 customize_hooks = [
     # 自前ビルドのカーネル deb (out/debs) を最初にインストールする
+    # カーネル deb の存在は build-rootfs.sh が事前検証済み (無ければここに来ない)。
+    # コピー失敗は握りつぶさず、そのままビルドを失敗させる。
     # -dbg (デバッグシンボル ~500MiB) は「軽量」方針に反するため除外する
-    # (DEBUG_INFO_NONE で生成自体も止めているが、キャッシュ済み deb への防御)
     f'mkdir -p "$1/tmp/kernel-debs" && cp "{TOP}"/out/debs/linux-image-*.deb '
-    f'"{TOP}"/out/debs/linux-headers-*.deb "$1/tmp/kernel-debs/" 2>/dev/null; '
-    'rm -f "$1/tmp/kernel-debs/"linux-image-*-dbg_*.deb; true',
+    f'"{TOP}"/out/debs/linux-headers-*.deb "$1/tmp/kernel-debs/" && '
+    'rm -f "$1/tmp/kernel-debs/"linux-image-*-dbg_*.deb',
+    # dpkg -i の失敗を apt-get -f が依存解決して完了させるのは正常系だが、
+    # 最終的にカーネルが本当に入ったか (/boot/vmlinuz-*) を必ず確認する
     'chroot "$1" sh -c "dpkg -i /tmp/kernel-debs/*.deb || '
     'DEBIAN_FRONTEND=noninteractive apt-get -f install -y" && rm -rf "$1/tmp/kernel-debs"',
+    'ls "$1"/boot/vmlinuz-* > /dev/null 2>&1 || '
+    '{ echo "エラー: カーネルが rootfs にインストールされていない" >&2; exit 1; }',
+    # headers も apt-get -f が削除して「成功」する可能性があるため実在を確認する
+    'ls -d "$1"/usr/src/linux-headers-* > /dev/null 2>&1 || '
+    '{ echo "エラー: linux-headers が rootfs にインストールされていない" >&2; exit 1; }',
     # files/ overlay をそのまま重ねる
     f'if [ -d "{TOP}/files" ]; then cp -a "{TOP}/files/." "$1/"; fi',
     # hostname
@@ -82,9 +90,17 @@ customize_hooks = [
     # おくことで、実機での以後のカーネル更新でも root= が維持される
     'echo "rw console=tty1 console=ttyS2,1500000n8" > "$1/etc/kernel/cmdline"',
     'echo \'U_BOOT_PARAMETERS="$(cat /etc/kernel/cmdline)"\' >> "$1/etc/default/u-boot"',
-    # カーネル導入後の起動整備
-    'chroot "$1" u-boot-update || true',
-    'chroot "$1" update-initramfs -c -k all || true',
+    # カーネル導入後の起動整備。initramfs を先に確定させてから extlinux.conf を
+    # 生成する (逆順だと initrd 行が欠けた extlinux.conf になり得る)。
+    # 失敗は握りつぶさず、成果物 (initrd / extlinux.conf) の実在まで確認する
+    'chroot "$1" update-initramfs -c -k all',
+    'chroot "$1" u-boot-update',
+    'ls "$1"/boot/initrd.img-* > /dev/null 2>&1 || '
+    '{ echo "エラー: initrd が生成されていない" >&2; exit 1; }',
+    'test -s "$1/boot/extlinux/extlinux.conf" || '
+    '{ echo "エラー: extlinux.conf が生成されていない" >&2; exit 1; }',
+    'grep -q "initrd" "$1/boot/extlinux/extlinux.conf" || '
+    '{ echo "エラー: extlinux.conf に initrd 行が無い (起動不能になる)" >&2; exit 1; }',
 ]
 
 config = {

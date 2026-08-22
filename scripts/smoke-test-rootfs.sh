@@ -100,6 +100,17 @@ check "カーネル (vmlinuz)"                 '^-.* \./boot/vmlinuz-[0-9][^ ]*$
 check "initrd"                             '^-.* \./boot/initrd\.img-[0-9][^ ]*$'
 check "E54C の DTB"                        '^-.* \./usr/lib/linux-image-[^ ]*/rockchip/rk3582-radxa-e54c\.dtb$'
 check "extlinux.conf (u-boot-update 生成)" '^-.* \./boot/extlinux/extlinux\.conf$'
+# 全 stanza に initrd 行があること (root=UUID は initramfs 必須。
+# u-boot-update と update-initramfs の順序バグで実際に欠落した回帰の固定)
+extlinux="$(tar -xOf "$TAR" ./boot/extlinux/extlinux.conf 2> /dev/null)"
+n_linux="$(grep -c $'^\tlinux ' <<< "$extlinux" || true)"
+n_initrd="$(grep -c $'^\tinitrd ' <<< "$extlinux" || true)"
+if [[ "$n_linux" -gt 0 && "$n_linux" -eq "$n_initrd" ]]; then
+	echo "ok: extlinux.conf の全 stanza に initrd 行がある ($n_linux/$n_linux)"
+else
+	echo "NG: extlinux.conf の initrd 行が不足 (linux=$n_linux initrd=$n_initrd)"
+	fail=1
+fi
 check "/etc/kernel/cmdline"                '^-.* \./etc/kernel/cmdline$'
 check "U-Boot 書き込みスクリプト (実行可)" '^-rwx.* \./usr/lib/u-boot/radxa-e54c/setup\.sh$'
 
