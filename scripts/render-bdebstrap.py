@@ -57,6 +57,11 @@ customize_hooks = [
     f'echo "127.0.1.1\t{cfg["image"]["hostname"]}" >> "$1/etc/hosts"',
     # 自作フック (chroot 外から $1 を渡して実行)
     f'for h in "{TOP}"/hooks/customize.d/*.sh; do [ -e "$h" ] && bash "$h" "$1"; done',
+    # ブート用カーネル引数。root= は build-image.sh がイメージ作成時に UUID を注入する。
+    # u-boot-update が /etc/kernel/cmdline を参照するよう /etc/default/u-boot を配線して
+    # おくことで、実機での以後のカーネル更新でも root= が維持される
+    'echo "rw console=tty1 console=ttyS2,1500000n8" > "$1/etc/kernel/cmdline"',
+    'echo \'U_BOOT_PARAMETERS="$(cat /etc/kernel/cmdline)"\' >> "$1/etc/default/u-boot"',
     # カーネル導入後の起動整備
     'chroot "$1" u-boot-update || true',
     'chroot "$1" update-initramfs -c -k all || true',
