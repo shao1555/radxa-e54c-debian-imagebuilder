@@ -30,7 +30,7 @@ CI も同一コンテナで実行されるため、ローカルと CI の環境�
 # VS Code の場合: フォルダを開いて "Reopen in Container" → ターミナルで
 make            # kernel → rootfs → image を順に実行
 make kernel     # 個別実行も可
-make image VERSION=v2026.08.22-2100
+make image IMG_VERSION=v2026.08.22-2100
 
 # devcontainer CLI の場合
 npm exec -- @devcontainers/cli up --workspace-folder .
@@ -101,7 +101,9 @@ CI は **devcontainer / kernel / rootfs / image / release の 5 ジョブ**の�
   - ✅ guestfish のアプライアンス起動(KVM 無し環境は force_tcg 自動適用、起動 ~10 秒)
   - ✅ **カーネルビルド**(linux 7.2 + 同梱 DTS、フルビルド 23 分 / 増分 2 分 @ Apple Silicon 8 コア。
     `rk3582-radxa-e54c.dtb`・`rtl8365mb.ko`(DSA スイッチ)・`dwmac-rk.ko`(GMAC)の同梱を検収済み)
-  - ⬜ イメージ組み立ての通し実行(カーネル入り rootfs での `make rootfs` → `make image`)は未実施
+  - ✅ **`make all` の通し実行**(kernel → rootfs → image、49 分 41 秒 @ Apple Silicon 8 コア。
+    GPT レイアウト・rootfs 縮小(8GiB 確保 → 3.1GiB)・sector 64 の idbloader(RKNS
+    マジック)まで検分済み。残るは実機での SD ブート確認のみ)
 
 ## ライセンス
 

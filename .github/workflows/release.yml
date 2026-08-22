@@ -201,7 +201,7 @@ jobs:
 
       - name: Build image
         run: |
-          make image VERSION=${{ steps.ver.outputs.version }}
+          make image IMG_VERSION=${{ steps.ver.outputs.version }}
           cd out && sha512sum *.img.xz > SHA512SUMS
 
       - name: Upload image
