@@ -22,7 +22,11 @@ kernel:
   # 7.3 リリース (E54C DTS 上流化見込み) 後に "7.3" へ切り替える
   version: "7.2"
   localversion: "-e54c1"
-  # ベース config: "defconfig" (arch/arm64) を seed に fragments を重ねる
+  # ベース config:
+  #   defconfig = arch/arm64 の defconfig を seed (高速。既定。必要機能は
+  #               fragments で明示し、ビルド時に反映検証される)
+  #   debian    = Debian の arm64 config を seed (網羅的だがビルド時間は数倍。
+  #               arm64 コンテナの devcontainer でのみ利用可)
   base_config: defconfig
   fragments:
     - kernel/config/e54c.config
