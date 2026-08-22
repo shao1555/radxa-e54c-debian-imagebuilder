@@ -1,0 +1,23 @@
+{
+	"name": "e54c-server-imagebuilder",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	// mmdebstrap (root mode) / chroot / binfmt / libguestfs のため特権が必要
+	"privileged": true,
+	"remoteUser": "root",
+	"containerEnv": {
+		"LIBGUESTFS_BACKEND": "direct",
+		"E54C_BUILD_DIR": "/build"
+	},
+	// カーネルのソース展開・ビルドは virtiofs (macOS のバインドマウント) を避けて
+	// Docker ボリューム上で行う (tar のディレクトリ展開問題 + ビルド速度のため)
+	"mounts": [
+		"source=e54c-kernel-build,target=/build,type=volume"
+	],
+	// Linux ホスト (KVM あり) では libguestfs が高速化される。macOS では無視される
+	"runArgs": [
+		"--security-opt", "seccomp=unconfined"
+	],
+	"postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} || true"
+}

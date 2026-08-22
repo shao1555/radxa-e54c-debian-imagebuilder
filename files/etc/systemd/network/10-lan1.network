@@ -1,0 +1,8 @@
+# lan1 はホスト管理用 (DHCP)。
+# wan / lan2 / lan3 はホストでは未設定のまま残し、OpenWrt コンテナへ
+# `incus config device add <ct> wan nic nictype=physical parent=wan` で払い出す想定。
+[Match]
+Name=lan1
+
+[Network]
+DHCP=yes

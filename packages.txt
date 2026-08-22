@@ -1,0 +1,41 @@
+# rootfs に追加インストールする deb パッケージ (1 行 1 パッケージ、# はコメント)
+# suite 指定は pkg/suite-backports の形式で可
+
+# --- コンテナ基盤 (このディストロの主目的) ---
+# Incus: LXC 陣営の現行コンテナ/VM マネージャ。trixie main に 6.0 LTS が収録済み。
+# OpenWrt コンテナは images:openwrt/* をそのまま起動できる
+incus
+incus-client
+# 低レベル LXC ツール (デバッグ・互換用)
+lxc
+
+# --- ネットワーク ---
+# ルーター用途の基本。OpenWrt コンテナの firewall4 はホストの nft モジュールを使う
+nftables
+systemd-resolved
+# DSA スイッチポートの操作・診断
+ethtool
+iproute2
+tcpdump
+
+# --- システム基本 ---
+systemd-timesyncd
+openssh-server
+ca-certificates
+curl
+gnupg
+# 初回起動時の rootfs 拡張
+cloud-initramfs-growroot
+# fstrim 等
+util-linux-extra
+# NVMe/SSD
+nvme-cli
+smartmontools
+
+# --- 運用ツール (軽量方針: 最小限) ---
+htop
+tmux
+vim-tiny
+
+# NOTE: k3s は deb が無いため hooks/customize.d/10-install-k3s.sh で
+# バージョン・チェックサム固定の静的バイナリとして導入する

@@ -1,0 +1,45 @@
+name: Build and release image
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # amd64 ランナーで arm64 rootfs を chroot 構築するための binfmt 登録
+      # (binfmt はカーネルグローバルなので、ホストで登録すればコンテナ内でも有効)
+      - name: Set up QEMU emulation
+        uses: docker/setup-qemu-action@v3
+        with:
+          image: tonistiigi/binfmt:latest
+
+      - name: Generate version (CalVer, JST)
+        id: ver
+        run: echo "version=$(TZ=Asia/Tokyo date +v%Y.%m.%d-%H%M)" >> "$GITHUB_OUTPUT"
+
+      # ローカル開発と同一の devcontainer 内でビルドする (環境の一致を保証)
+      - name: Build within devcontainer
+        uses: devcontainers/ci@v0.3
+        with:
+          push: never
+          runCmd: |
+            set -euo pipefail
+            make all VERSION=${{ steps.ver.outputs.version }}
+            cd out && sha512sum *.img.xz > SHA512SUMS
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          files: |
+            out/*.img.xz
+            out/SHA512SUMS
+            out/rootfs/build/manifest
+            out/rootfs/bdebstrap.yaml

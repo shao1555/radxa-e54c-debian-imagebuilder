@@ -1,0 +1,41 @@
+# e54c-server-imagebuilder の宣言的設定
+# ここと packages.txt / files/ / kernel/ だけを編集すれば済むのが設計目標。
+
+image:
+  name: e54c-server        # 出力: <name>_<suite>_<version>.img.xz
+  hostname: e54c-server
+  # ビルド時に確保する仮サイズ (GiB)。最終イメージは実サイズまで自動縮小される
+  size_gb: 8
+
+debian:
+  suite: trixie
+  mirror: https://deb.debian.org/debian
+  components:
+    - main
+    - contrib
+    - non-free-firmware
+  # mmdebstrap variant。apt = essential + apt の最小構成から積み上げる
+  variant: apt
+
+kernel:
+  # kernel.org のバージョン。rc も指定可 (例: "7.3-rc4")
+  # 7.3 リリース (E54C DTS 上流化見込み) 後に "7.3" へ切り替える
+  version: "7.2"
+  localversion: "-e54c1"
+  # ベース config: "defconfig" (arch/arm64) を seed に fragments を重ねる
+  base_config: defconfig
+  fragments:
+    - kernel/config/e54c.config
+  # kernel/patches/*.patch が series 順 (ファイル名昇順) に git apply される。
+  # kernel/dts/*.dts は arch/arm64/boot/dts/rockchip/ に「in-tree に同名が無い場合のみ」
+  # コピーされ、Makefile に自動登録される (7.3 で上流化されたら自然に無効化される)
+  dtb: rockchip/rk3582-radxa-e54c.dtb
+
+uboot:
+  # 当面は Radxa の vendor U-Boot deb を流用する
+  # (vendor U-Boot + extlinux で mainline カーネルが起動することは実証済み。
+  #  RK3582 の選別コア無効化も vendor U-Boot が DT を書き換えてくれる)
+  apt_repo: https://radxa-repo.github.io/bookworm
+  apt_suite: bookworm
+  packages:
+    - u-boot-radxa-e54c
