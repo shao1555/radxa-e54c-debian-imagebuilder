@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # カーネルビルド (共通)。libdw-dev は 7.x の bindeb-pkg の Build-Depends、
         # dwarves は CONFIG_DEBUG_INFO_BTF 用の pahole
         build-essential flex bison bc libssl-dev libelf-dev libdw-dev dwarves \
+        ccache \
         debhelper kmod rsync cpio git curl xz-utils \
         python3 python3-yaml \
         # イメージ組み立て

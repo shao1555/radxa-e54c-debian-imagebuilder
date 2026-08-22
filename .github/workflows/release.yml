@@ -6,15 +6,47 @@ on:
 
 permissions:
   contents: write
+  packages: write
+
+# 連続 push 時は古いビルドをキャンセルして最新だけ走らせる
+concurrency:
+  group: build-release
+  cancel-in-progress: true
+
+env:
+  DEVCONTAINER_IMAGE: ghcr.io/${{ github.repository }}/devcontainer
 
 jobs:
   build:
-    # arm64 ランナー (パブリックリポジトリでは無料)。QEMU 不要のネイティブビルドになり、
-    # カーネルビルドも rootfs 構築も大幅に速い。
+    # arm64 ランナー (パブリックリポジトリでは無料)。QEMU 不要のネイティブビルド。
     # amd64 ランナーに戻す場合は ubuntu-latest + docker/setup-qemu-action を復活させること
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+
+      # --- キャッシュ 1: カーネル deb (入力が変わらなければビルド丸ごとスキップ) ---
+      - name: Restore kernel debs
+        uses: actions/cache@v4
+        with:
+          path: out/debs
+          key: kernel-debs-${{ runner.arch }}-${{ hashFiles('config.yaml', 'kernel/**', 'scripts/build-kernel.sh') }}
+
+      # --- キャッシュ 2: ccache (カーネル入力が変わったときの再コンパイル短縮) ---
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: out/ccache
+          key: ccache-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.arch }}-
+
+      # --- キャッシュ 3: devcontainer イメージ (GHCR に push して次回以降 pull) ---
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate version (CalVer, JST)
         id: ver
@@ -24,10 +56,13 @@ jobs:
       - name: Build within devcontainer
         uses: devcontainers/ci@v0.3
         with:
-          push: never
+          imageName: ${{ env.DEVCONTAINER_IMAGE }}
+          cacheFrom: ${{ env.DEVCONTAINER_IMAGE }}
+          push: always
           runCmd: |
             set -euo pipefail
-            make all VERSION=${{ steps.ver.outputs.version }}
+            export CCACHE_DIR="$PWD/out/ccache"
+            make ci VERSION=${{ steps.ver.outputs.version }}
             cd out && sha512sum *.img.xz > SHA512SUMS
 
       - name: Release

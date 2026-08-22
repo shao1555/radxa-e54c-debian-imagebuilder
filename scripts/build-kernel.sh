@@ -68,6 +68,17 @@ scripts/kconfig/merge_config.sh -m .config "${frags[@]}"
 make olddefconfig
 
 # --- ビルド (deb 生成) ---
-make -j"$(nproc)" LOCALVERSION="$localver" KDEB_PKGVERSION="${ver//-/\~}${localver}-1" bindeb-pkg
+# ccache があれば使う (CI ではキャッシュ復元と組み合わせて再コンパイルを短縮)
+MAKE_CC=()
+if command -v ccache > /dev/null; then
+	export CCACHE_DIR="${CCACHE_DIR:-${E54C_BUILD_DIR:-$OUT}/ccache}"
+	export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-2G}"
+	mkdir -p "$CCACHE_DIR"
+	MAKE_CC=(CC="ccache ${CROSS_COMPILE:-}gcc")
+	ccache -z > /dev/null || true
+fi
+make -j"$(nproc)" LOCALVERSION="$localver" KDEB_PKGVERSION="${ver//-/\~}${localver}-1" \
+	"${MAKE_CC[@]}" bindeb-pkg
+command -v ccache > /dev/null && ccache -s | head -5 || true
 mv ../linux-*.deb "$OUT/debs/"
 ls -la "$OUT/debs/"
