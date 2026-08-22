@@ -58,9 +58,12 @@ npm exec -- @devcontainers/cli exec --workspace-folder . make
 main への push で CalVer タグ(`vYYYY.MM.DD-HHMM`、JST)の Release に
 イメージ・SHA512・manifest・bdebstrap.yaml(ビルドの完全な記録)が公開される。
 
-CI は **kernel / rootfs / image / release の 4 ジョブ**のパイプライン
+CI は **devcontainer / kernel / rootfs / image / release の 5 ジョブ**のパイプライン
 (artifact 転送は実測で十分速いため、ステージごとにキャッシュ・リトライできる粒度に分割):
 
+- **devcontainer**: ビルド環境イメージを「日付 + .devcontainer 内容ハッシュ」のタグで
+  GHCR に構築。同タグが存在すればビルドせず再利用(日次ローテ)。
+  下流ジョブはこのタグを **plain `docker run` するだけ**で、イメージ構築を行わない
 - **kernel**: 入力(config.yaml / kernel/ / build script)のハッシュでキャッシュされ、
   変更が無ければ数秒でスキップ。ミス時も ccache で再コンパイルを短縮
 - **rootfs**: 入力ハッシュ + **日付**でキャッシュ(日次ローテ)。同日の再 push は
@@ -68,7 +71,8 @@ CI は **kernel / rootfs / image / release の 4 ジョブ**のパイプライ�
   (永続キャッシュにすると Debian のセキュリティ更新が取り込まれなくなるため)
 - **image**: guestfish によるイメージ組み立て(rootfs.tar のみを入力に取る)
 - **release**: リリース作成のみの最小権限ジョブ。ここだけの失敗は re-run で復旧可
-- devcontainer イメージは GHCR にキャッシュされ、2 回目以降は pull のみ
+- 権限も最小化: GHCR へ push するのは devcontainer ジョブのみ(packages: write)。
+  下流は pull のみ(packages: read)、release は contents: write のみ
 - action はサプライチェーン対策として**コミット SHA で固定**(コメントが参照バージョン)
 
 ## 設計上の前提と注意
