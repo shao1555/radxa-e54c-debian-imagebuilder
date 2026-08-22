@@ -12,31 +12,30 @@ concurrency:
 env:
   DEVCONTAINER_IMAGE: ghcr.io/${{ github.repository }}/devcontainer
 
-# arm64 ランナー (パブリックリポジトリでは無料) でネイティブビルドする。
-# amd64 ランナーに戻す場合は ubuntu-latest + docker/setup-qemu-action を復活させること
+# - arm64 ランナー (パブリックリポジトリでは無料) でネイティブビルドする。
+#   amd64 に戻す場合は ubuntu-latest + docker/setup-qemu-action を復活させること
+# - サプライチェーン対策として action はすべてコミット SHA で固定する
+#   (コメントのバージョンは参照用)
 
 jobs:
-  # ステージ 1: カーネル deb。入力 (config.yaml / kernel/ / build script) が
-  # 変わらなければキャッシュ復元だけで数秒で終わる
+  # ステージ 1: カーネル deb。入力が変わらなければキャッシュ復元だけで数秒
   kernel:
     runs-on: ubuntu-24.04-arm
     permissions:
       packages: write
-    outputs:
-      cache-hit: ${{ steps.debs.outputs.cache-hit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Restore kernel debs
         id: debs
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: out/debs
           key: kernel-debs-${{ runner.arch }}-${{ hashFiles('config.yaml', 'kernel/**', 'scripts/build-kernel.sh') }}
 
       - name: Restore ccache
         if: steps.debs.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: out/ccache
           key: ccache-${{ runner.arch }}-${{ github.run_id }}
@@ -45,7 +44,7 @@ jobs:
 
       - name: Log in to GHCR
         if: steps.debs.outputs.cache-hit != 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -53,7 +52,7 @@ jobs:
 
       - name: Build kernel within devcontainer
         if: steps.debs.outputs.cache-hit != 'true'
-        uses: devcontainers/ci@v0.3
+        uses: devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca # v0.3.1900000450
         with:
           imageName: ${{ env.DEVCONTAINER_IMAGE }}
           cacheFrom: ${{ env.DEVCONTAINER_IMAGE }}
@@ -64,32 +63,95 @@ jobs:
             make kernel
 
       - name: Upload kernel debs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kernel-debs
           path: out/debs/*.deb
           if-no-files-found: error
 
-  # ステージ 2: rootfs 構築 + イメージ組み立て。
-  # (間を流れる rootfs.tar が ~750MB あるため、この 2 つは分割しない)
-  image:
+  # ステージ 2: rootfs 構築。キャッシュキーに日付を含めた日次ローテ:
+  # 同日の再 push は高速化しつつ、翌日には必ず fresh な apt 状態で作り直す
+  # (永続キャッシュにすると Debian のセキュリティ更新が取り込まれなくなるため)
+  rootfs:
     needs: kernel
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Date stamp (JST)
+        id: date
+        run: echo "date=$(TZ=Asia/Tokyo date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore rootfs
+        id: rootfs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out/rootfs
+          key: rootfs-${{ runner.arch }}-${{ steps.date.outputs.date }}-${{ hashFiles('config.yaml', 'packages.txt', 'files/**', 'hooks/**', 'kernel/**', 'scripts/build-kernel.sh', 'scripts/build-rootfs.sh', 'scripts/render-bdebstrap.py') }}
+
+      - name: Download kernel debs
+        if: steps.rootfs.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kernel-debs
+          path: out/debs
+
+      - name: Log in to GHCR
+        if: steps.rootfs.outputs.cache-hit != 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build rootfs within devcontainer
+        if: steps.rootfs.outputs.cache-hit != 'true'
+        uses: devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca # v0.3.1900000450
+        with:
+          imageName: ${{ env.DEVCONTAINER_IMAGE }}
+          cacheFrom: ${{ env.DEVCONTAINER_IMAGE }}
+          push: always
+          runCmd: |
+            set -euo pipefail
+            make rootfs
+
+      - name: Upload rootfs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootfs
+          path: out/rootfs/build/rootfs.tar
+          if-no-files-found: error
+
+      - name: Upload rootfs metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootfs-meta
+          path: |
+            out/rootfs/build/manifest
+            out/rootfs/bdebstrap.yaml
+          if-no-files-found: error
+
+  # ステージ 3: イメージ組み立て (guestfish)。rootfs.tar だけを入力に取る
+  image:
+    needs: rootfs
     runs-on: ubuntu-24.04-arm
     permissions:
       packages: write
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Download kernel debs
-        uses: actions/download-artifact@v4
+      - name: Download rootfs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: kernel-debs
-          path: out/debs
+          name: rootfs
+          path: out/rootfs/build
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -99,49 +161,50 @@ jobs:
         id: ver
         run: echo "version=$(TZ=Asia/Tokyo date +v%Y.%m.%d-%H%M)" >> "$GITHUB_OUTPUT"
 
-      - name: Build rootfs and image within devcontainer
-        uses: devcontainers/ci@v0.3
+      - name: Build image within devcontainer
+        uses: devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca # v0.3.1900000450
         with:
           imageName: ${{ env.DEVCONTAINER_IMAGE }}
           cacheFrom: ${{ env.DEVCONTAINER_IMAGE }}
           push: always
           runCmd: |
             set -euo pipefail
-            make rootfs
             make image VERSION=${{ steps.ver.outputs.version }}
             cd out && sha512sum *.img.xz > SHA512SUMS
 
-      - name: Upload image artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: image
           path: |
             out/*.img.xz
             out/SHA512SUMS
-            out/rootfs/build/manifest
-            out/rootfs/bdebstrap.yaml
           if-no-files-found: error
 
-  # ステージ 3: リリース作成のみ (devcontainer 不要・最小権限)。
-  # ここだけ失敗した場合は release ジョブの re-run で済む
+  # ステージ 4: リリース作成のみ (devcontainer 不要・contents: write のみ)
   release:
-    needs: image
+    needs: [rootfs, image]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download image artifacts
-        uses: actions/download-artifact@v4
+      - name: Download image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: image
           path: out
 
+      - name: Download rootfs metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rootfs-meta
+          path: out/meta
+
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ needs.image.outputs.version }}
           files: |
             out/*.img.xz
             out/SHA512SUMS
-            out/rootfs/build/manifest
-            out/rootfs/bdebstrap.yaml
+            out/meta/**
