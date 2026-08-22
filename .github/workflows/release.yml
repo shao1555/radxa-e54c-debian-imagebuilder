@@ -9,16 +9,12 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # arm64 ランナー (パブリックリポジトリでは無料)。QEMU 不要のネイティブビルドになり、
+    # カーネルビルドも rootfs 構築も大幅に速い。
+    # amd64 ランナーに戻す場合は ubuntu-latest + docker/setup-qemu-action を復活させること
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-
-      # amd64 ランナーで arm64 rootfs を chroot 構築するための binfmt 登録
-      # (binfmt はカーネルグローバルなので、ホストで登録すればコンテナ内でも有効)
-      - name: Set up QEMU emulation
-        uses: docker/setup-qemu-action@v3
-        with:
-          image: tonistiigi/binfmt:latest
 
       - name: Generate version (CalVer, JST)
         id: ver
