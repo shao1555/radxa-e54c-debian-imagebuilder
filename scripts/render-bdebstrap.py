@@ -90,7 +90,12 @@ config = {
         "setup-hooks": setup_hooks,
         "customize-hooks": customize_hooks,
         "cleanup-hooks": [
-            'rm -f "$1/etc/resolv.conf"',
+            # ビルドホストの DNS 設定 (mmdebstrap が入れる resolv.conf と、
+            # systemd-resolved postinst が退避した .bak) を除去し、resolved の
+            # stub への symlink に置き換える。単に削除するだけだと初回起動時に
+            # glibc が /etc/resolv.conf を見つけられず DNS 解決が壊れる
+            'rm -f "$1/etc/resolv.conf" "$1/etc/.resolv.conf.systemd-resolved.bak"',
+            'ln -s ../run/systemd/resolve/stub-resolv.conf "$1/etc/resolv.conf"',
             'rm -rf "$1/var/lib/apt/lists"/*',
             'rm -f "$1/etc/machine-id" "$1/var/lib/dbus/machine-id"',
         ],
