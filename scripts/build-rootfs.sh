@@ -10,9 +10,34 @@ TOP="$PWD"
 OUT="$TOP/out/rootfs"
 mkdir -p "$OUT"
 
-# devcontainer 内は root で動くため sudo を無効化
-SUDO="sudo"
+# devcontainer 内は root で動くため sudo を無効化。非 root では sudo の
+# env_reset で DEFAULT_PASSWORD が落ちないよう明示的に保持する
+SUDO="sudo --preserve-env=DEFAULT_PASSWORD"
 [[ $EUID -eq 0 ]] && SUDO=""
+
+# ローカルビルドの秘匿設定。make 経由の include だと $ や # を含むパスワードが
+# make の構文解釈で壊れるため、shell で source する (値はシングルクォート推奨)
+if [[ -f "$TOP/.env" ]]; then
+	# shellcheck source=/dev/null
+	source "$TOP/.env"
+fi
+
+# デフォルトユーザー (debian) のパスワード。値は bdebstrap.yaml に埋め込まれず、
+# フック実行時にこの環境変数から読まれる (リリース同梱の yaml に漏れない)
+if [[ -z "${DEFAULT_PASSWORD:-}" ]]; then
+	cat >&2 <<- 'EOF'
+	エラー: DEFAULT_PASSWORD が未設定です。
+	  ローカルビルド: cp .env.example .env して DEFAULT_PASSWORD を設定してください
+	  (CI は workflow が DEFAULT_PASSWORD=debian を設定します)
+	EOF
+	exit 1
+fi
+# chpasswd は行区切りで解釈するため、CR/LF を含む値は事故のもとなので拒否する
+if [[ "$DEFAULT_PASSWORD" == *$'\n'* || "$DEFAULT_PASSWORD" == *$'\r'* ]]; then
+	echo "エラー: DEFAULT_PASSWORD に改行 (CR/LF) を含めることはできません" >&2
+	exit 1
+fi
+export DEFAULT_PASSWORD
 
 python3 scripts/render-bdebstrap.py "$OUT"
 

@@ -71,7 +71,8 @@ CI は **devcontainer / kernel / rootfs / image / release の 5 ジョブ**の�
   (永続キャッシュにすると Debian のセキュリティ更新が取り込まれなくなるため)。
   ビルド・キャッシュ復元のどちらの経路でも **smoke test**
   (`scripts/smoke-test-rootfs.sh`、networkd/resolved の enable・resolv.conf・
-  カーネル/DTB/extlinux・incus/k3s 等 19 項目)が走る。ローカルは `make check`
+  SSH ホスト鍵不在・ログイン可能性・カーネル/DTB/extlinux・incus/k3s 等)が走る。
+  ローカルは `make check`
 - **image**: guestfish によるイメージ組み立て(rootfs.tar のみを入力に取る)。
   このジョブだけ **x64 ランナー**: GitHub の x64 は KVM が使えるため、libguestfs の
   アプライアンスが TCG(arm64 ランナー)より大幅に速い。アプライアンスの仕事は
@@ -80,6 +81,21 @@ CI は **devcontainer / kernel / rootfs / image / release の 5 ジョブ**の�
 - 権限も最小化: GHCR へ push するのは devcontainer ジョブのみ(packages: write)。
   下流は pull のみ(packages: read)、release は contents: write のみ
 - action はサプライチェーン対策として**コミット SHA で固定**(コメントが参照バージョン)
+
+## ログイン
+
+- **リリースイメージ**: ユーザー `debian` / パスワード `debian`(公開値)。
+  **初回ログイン時にパスワード変更を強制される**(既知パスワードのままの運用を防ぐ)。
+  変更後は公開鍵運用への移行を推奨。公開値である以上、初回起動〜初回ログインの間は
+  誰でもログインできるため、**初回セットアップは信頼できる隔離ネットワーク
+  (直結ケーブル等)で行うこと**
+- **自分でビルドする場合**: `cp .env.example .env` して `DEFAULT_PASSWORD` を
+  設定しないと `make rootfs` が失敗する。パスワードはビルド成果物の
+  bdebstrap.yaml には埋め込まれない(フック実行時の環境変数参照)
+- **パスワード認証の無効化**: 公開鍵を配置したら
+  `/etc/ssh/sshd_config.d/10-e54c-server.conf` の 1 行を `no` に変えるだけ
+- **SSH ホスト鍵**: イメージには焼き込まれず(全端末が同一鍵を共有してしまうため)、
+  各端末の初回起動時に trixie 標準の `sshd-keygen.service` が生成する
 
 ## 設計上の前提と注意
 
