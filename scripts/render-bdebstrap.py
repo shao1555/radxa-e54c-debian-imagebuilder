@@ -46,8 +46,11 @@ setup_hooks = [
 
 customize_hooks = [
     # 自前ビルドのカーネル deb (out/debs) を最初にインストールする
+    # -dbg (デバッグシンボル ~500MiB) は「軽量」方針に反するため除外する
+    # (DEBUG_INFO_NONE で生成自体も止めているが、キャッシュ済み deb への防御)
     f'mkdir -p "$1/tmp/kernel-debs" && cp "{TOP}"/out/debs/linux-image-*.deb '
-    f'"{TOP}"/out/debs/linux-headers-*.deb "$1/tmp/kernel-debs/" 2>/dev/null || true',
+    f'"{TOP}"/out/debs/linux-headers-*.deb "$1/tmp/kernel-debs/" 2>/dev/null; '
+    'rm -f "$1/tmp/kernel-debs/"linux-image-*-dbg_*.deb; true',
     'chroot "$1" sh -c "dpkg -i /tmp/kernel-debs/*.deb || '
     'DEBIAN_FRONTEND=noninteractive apt-get -f install -y" && rm -rf "$1/tmp/kernel-debs"',
     # files/ overlay をそのまま重ねる

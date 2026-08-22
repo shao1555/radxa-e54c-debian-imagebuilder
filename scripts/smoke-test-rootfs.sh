@@ -108,6 +108,19 @@ check "incus (実行可)"                     '^-rwx.* \./usr/bin/incus$'
 check "k3s バイナリ (実行可)"              '^-rwx.* \./usr/local/bin/k3s$'
 check "k3s の systemd unit"                '^-.* \./etc/systemd/system/k3s\.service$'
 
+# AppArmor: カーネル側の有効化だけでは不十分で、apparmor_parser が無いと
+# incus が AppArmor サポートを無効化する
+check "apparmor_parser (incus のコンテナ隔離に必要)" '^-rwx.* \./usr/sbin/apparmor_parser$'
+
+# OpenWrt firewall4 の標準 ruleset が必要とする nft モジュール群
+for m in nft_limit nft_log nft_redir nft_quota nft_numgen nft_hash nft_fib_inet \
+	nft_ct nft_nat nft_masq nft_reject; do
+	check "nft モジュール: $m" "/${m}\\.ko\$"
+done
+
+# デバッグシンボル (linux-image-*-dbg) は ~500MiB あり軽量方針に反する
+check_absent "カーネルのデバッグシンボルが入っていない" '\./usr/lib/debug/'
+
 # --- ビルド環境の痕跡が無いこと ---
 check_absent "/etc/machine-id が焼き込まれていない"          '\./etc/machine-id$'
 check_absent "/var/lib/dbus/machine-id が焼き込まれていない" '\./var/lib/dbus/machine-id$'

@@ -41,6 +41,12 @@ RUN curl -fsL "https://radxa-repo.github.io/bookworm/files.list" -o /tmp/files.l
     && dpkg -i /tmp/radxa-keyring.deb \
     && rm -f /tmp/radxa-keyring.deb /tmp/files.list
 
+# kernel.base_config: debian 用の Debian カーネル config
+# (このコンテナのアーキテクチャ分の config が入る。E54C 用途では arm64 で使う)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        "linux-config-6.12" \
+    && rm -rf /var/lib/apt/lists/*
+
 # libguestfs のアプライアンスがコンテナ内の /boot からカーネルを拾えるようにする
 # (コンテナにはホストのカーネルが無いため、パッケージとして入れておく)
 RUN apt-get update && apt-get install -y --no-install-recommends \

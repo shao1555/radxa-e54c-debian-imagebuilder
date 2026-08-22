@@ -8,6 +8,9 @@ incus
 incus-client
 # 低レベル LXC ツール (デバッグ・互換用)
 lxc
+# AppArmor の userspace。カーネル側を有効化しても apparmor_parser が無いと
+# incus は AppArmor サポートを無効化する (コンテナ隔離が弱くなる)
+apparmor
 
 # --- ネットワーク ---
 # ルーター用途の基本。OpenWrt コンテナの firewall4 はホストの nft モジュールを使う

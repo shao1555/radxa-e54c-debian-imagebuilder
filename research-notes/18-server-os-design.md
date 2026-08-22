@@ -64,6 +64,10 @@ incus config device add router lan3 nic nictype=physical parent=lan3
 - OpenWrt イメージは linuxcontainers.org の公式イメージ(`images:openwrt/*`)が incus でそのまま動く
 - ホスト側カーネルに OpenWrt の firewall4 が使う nftables/conntrack モジュール群が必要
   → **自前カーネルの config は Debian の arm64 config をベースにする**(モジュール欠けを防ぐ)
+  > **実装追記**: imagebuilder の既定は「defconfig + 明示 fragment + ビルド時の反映検証」
+  > とした(Debian config ベースはビルド時間が数倍になるため)。fragment の要求値が
+  > 依存関係不足で黙って落ちる問題は検証で捕捉する。`kernel.base_config: debian` で
+  > Debian config ベースにも切替可能
 - ブリッジ構成(スイッチとして使う)と物理パススルー構成(ルーターとして使う)を
   プリセットとして両方用意すると製品価値が出る
 
