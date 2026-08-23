@@ -52,8 +52,11 @@ upload $WORK/99-boottest.network /etc/systemd/network/99-boottest.network
 EOF
 # sed が本当に全 stanza に効いたか確認する (書式変更で 0 置換のまま進むと、
 # コンソール無しで 900 秒待った末に不明瞭なタイムアウトになる)
-n_append="$(grep -c $'^\tappend ' "$WORK/extlinux.conf" || true)"
-n_console="$(grep -c 'console=ttyAMA0' "$WORK/extlinux.conf" || true)"
+# append 行はインデント形式 (タブ/空白) を問わず数え、console は append 行上
+# でのみ数える (sed はタブ形式のみ書き換えるため、形式が変わればここで検出できる)
+n_append="$(grep -cE '^[[:space:]]+append[[:space:]]' "$WORK/extlinux.conf" || true)"
+n_console="$(grep -cE '^[[:space:]]+append[[:space:]].*console=ttyAMA0([[:space:]]|$)' \
+	"$WORK/extlinux.conf" || true)"
 if [[ $n_append -eq 0 || $n_append -ne $n_console ]]; then
 	echo "エラー: extlinux.conf への console=ttyAMA0 追記に失敗 (append=$n_append console=$n_console)" >&2
 	exit 1
