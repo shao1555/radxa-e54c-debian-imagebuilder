@@ -69,7 +69,7 @@ USB (DWC3)、ネット (STMMAC/DWMAC_ROCKCHIP) は =m だが、initramfs 経由�
 ベースの現行は n)、ROCKCHIP_MBOX (=y。現行 n)、CRYPTO_DEV_ROCKCHIP (=m)、
 USB ドングル/センサー類の広範な =m 群。
 
-## 結果 3: 既存 fragment はそのまま有効
+## 結果 3: 既存 fragment はほぼそのまま有効 (緩和 1 件 + 追加 2 件)
 
 merge_config は fragment を最後に重ねるので、Debian ベースでも
 `kernel/config/e54c.config` の全行がそのまま強制される。特に:
@@ -80,15 +80,29 @@ merge_config は fragment を最後に重ねるので、Debian ベースでも
 - LSM="landlock,lockdown,yama,integrity,apparmor" → Debian の長い LSM 列を
   決定的な値に上書き (AppArmor は QEMU ブートテストが実測で検証)
 
-fragment の追加・削除は不要。
+実際の切替では以下の調整が必要だった:
+
+- **MMC_SDHCI_OF_DWCMSHC を y→m に緩和**: debian ベースでは依存
+  MMC_SDHCI_PLTFM=m のため y に昇格できない (ビルド時の fragment 反映検証が
+  fail-fast で検出)。initramfs でロードされるので m で十分
+- **MMC_DW / MMC_DW_ROCKCHIP=m を追加** (Codex レビュー指摘): E54C の実ブート
+  パスは microSD = sdmmc ノード (dw_mmc) で、eMMC 側 (sdhci/DWCMSHC) は SFC と
+  競合するため DTS で disabled。本命の dw_mmc が fragment で担保されていなかった
 
 ## 残リスクと結論
 
 - linux-config-6.12 を 7.2 に olddefconfig で当てるため、6.12 以降に追加された
   新規オプションは Kconfig 既定値になる (多くは n)。fragment 検証が担保するのは
-  列挙分のみ。→ QEMU ブートテスト (シリアルログイン・DSA nft・SSH まで実測) が
-  このリスクのゲートとして機能する
-- ビルド時間: モジュール数 ~2.7 倍。CI は ccache + 日次キャッシュで初回のみ重い
+  列挙分のみ
+- **QEMU ブートテストの限界**: ディスクは virtio、NIC は virtio-net のため、
+  実 SD コントローラ (dw_mmc)・DSA スイッチ (rtl8365mb)・dwmac は実動検証
+  されない。これらは smoke test の静的検査 (モジュール実在) + 実機確認が担保
+- seed (linux-config パッケージ) は devcontainer の日次再構築で更新されるため、
+  CI のカーネルキャッシュキーに seed バージョンを含める (更新の取りこぼしと
+  再現性のブレを防ぐ)
+- ビルド時間: モジュール数 ~2.7 倍で devcontainer 実測 63 分 (defconfig 比 ~3 倍)。
+  CI は ccache + キャッシュで吸収し、config.yaml は kernel セクションのみを
+  キーにハッシュする (無関係な変更で 63 分の再ビルドを防ぐ)
 
 **結論: ハードウェアサポートの面で Debian ベース化に不足は無い。**
 唯一の実ギャップ (NET_DSA_REALTEK) は既存 fragment が既に埋めている。

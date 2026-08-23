@@ -152,6 +152,11 @@ for m in nft_limit nft_log nft_redir nft_quota nft_numgen nft_hash nft_fib_inet 
 	check "nft モジュール: $m" "/${m}\\.ko(\\.(gz|xz|zst))?\$"
 done
 
+# microSD ブートの生命線。QEMU テストは virtio ディスクのため実 SD コントローラ
+# (dw_mmc) を検証できず、ここで静的に固定する
+check "dw_mmc-rockchip モジュール (microSD ブートに必要)" \
+	"/dw_mmc-rockchip\\.ko(\\.(gz|xz|zst))?\$"
+
 # デバッグシンボル (linux-image-*-dbg) は ~500MiB あり軽量方針に反する
 check_absent "カーネルのデバッグシンボルが入っていない" '\./usr/lib/debug/'
 
