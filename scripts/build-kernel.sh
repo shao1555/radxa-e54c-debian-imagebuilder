@@ -50,7 +50,10 @@ else
 		exit 1
 	fi
 	tar="$BUILD_BASE/src/linux-$ver.tar.xz"
-	[[ -f $tar ]] || curl -fL "$lock_url" -o "$tar"
+	# CDN の一時障害で大きなダウンロードが切れることがあるため、
+	# リトライ + レジューム (-C -) で取得する (完全性は直後の sha256 検証が担保)
+	[[ -f $tar ]] || curl -fL --retry 5 --retry-all-errors --retry-delay 10 -C - \
+		"$lock_url" -o "$tar"
 	sha256sum -c --status <<< "$lock_sha  $tar" || {
 		echo "エラー: linux-$ver.tar.xz の sha256 が lock と一致しない" >&2
 		rm -f "$tar"

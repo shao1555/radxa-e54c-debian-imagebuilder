@@ -18,7 +18,9 @@ if [[ -z "$K3S_SHA256" ]]; then
 	exit 1
 fi
 
-curl -fL "$K3S_URL" -o "$ROOT/usr/local/bin/k3s"
+# 一時的なネットワーク障害に備えてリトライする (完全性は sha256 検証が担保)
+curl -fL --retry 5 --retry-all-errors --retry-delay 10 \
+	"$K3S_URL" -o "$ROOT/usr/local/bin/k3s"
 echo "$K3S_SHA256  $ROOT/usr/local/bin/k3s" | sha256sum -c -
 chmod 0755 "$ROOT/usr/local/bin/k3s"
 for cmd in kubectl crictl ctr; do

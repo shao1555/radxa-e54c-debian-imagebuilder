@@ -84,7 +84,7 @@ while IFS=$'\t' read -r pkg ver url sha; do
 	expected_debs+=("$(basename "$url")")
 	if [[ ! -f $deb ]] || ! sha256sum -c --status <<< "$sha  $deb" 2> /dev/null; then
 		echo "downloading $pkg $ver ..."
-		curl -fL "$url" -o "$deb"
+		curl -fL --retry 5 --retry-all-errors --retry-delay 10 "$url" -o "$deb"
 	fi
 	sha256sum -c --status <<< "$sha  $deb" || {
 		echo "エラー: $pkg の sha256 が lock と一致しない (upstream の改変または消失)" >&2
