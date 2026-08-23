@@ -43,6 +43,7 @@ Debian のソースからどのように作られているかを調査した結�
 | [16-upstream-e54c-patch.md](16-upstream-e54c-patch.md) | 上流に投稿された公式 E54C パッチとの差分検証(答え合わせ) |
 | [17-armbian-e54c.md](17-armbian-e54c.md) | Armbian の E54C サポートの実装レベル(Radxa 公式・メインラインとの比較) |
 | [18-server-os-design.md](18-server-os-design.md) | E54C 向け軽量サーバー OS ディストロの設計提案(ベース選定・アーキテクチャ・タイムライン) |
+| [19-kernel-config-comparison.md](19-kernel-config-comparison.md) | kernel config 比較: Debian ベース化 (Issue #2) — Radxa/Rockchip config との突き合わせで不足なしと結論 |
 
 ## 実装
 

@@ -146,9 +146,10 @@ check_absent "k3s が enable されていない" \
 check "apparmor_parser (incus のコンテナ隔離に必要)" '^-rwx.* \./usr/sbin/apparmor_parser$'
 
 # OpenWrt firewall4 の標準 ruleset が必要とする nft モジュール群
+# (debian ベース config は CONFIG_MODULE_COMPRESS_XZ=y のため .ko.xz になる)
 for m in nft_limit nft_log nft_redir nft_quota nft_numgen nft_hash nft_fib_inet \
 	nft_ct nft_nat nft_masq nft_reject; do
-	check "nft モジュール: $m" "/${m}\\.ko\$"
+	check "nft モジュール: $m" "/${m}\\.ko(\\.(gz|xz|zst))?\$"
 done
 
 # デバッグシンボル (linux-image-*-dbg) は ~500MiB あり軽量方針に反する
