@@ -149,6 +149,16 @@ for want in ' trixie ' ' trixie-updates ' ' trixie-security '; do
 		fail=1
 	fi
 done
+# ビルド時の apt 設定 (Check-Valid-Until 無効化) が成果物に残っていないこと
+# (残ると配備後の apt が期限切れ Release を受理する)
+apt_conf="$(for f in $(tar -tf "$TAR" | grep -E '^\./etc/apt/apt\.conf\.d/.'); do \
+	tar -xOf "$TAR" "$f" 2> /dev/null; done)"
+if grep -qi 'Check-Valid-Until' <<< "$apt_conf"; then
+	echo "NG: apt.conf.d に Check-Valid-Until の無効化が残っている"
+	fail=1
+else
+	echo "ok: apt.conf.d にビルド時の apt 設定が残っていない"
+fi
 
 # Radxa deb は lock 固定の dpkg 投入だが、配備後の U-Boot 更新経路
 # (リポジトリ設定 + keyring) は成果物に残っていること

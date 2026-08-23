@@ -21,4 +21,16 @@ if [[ "$got" != "$want" ]]; then
 	echo "  devcontainer イメージを作り直すこと" >&2
 	exit 1
 fi
+# ベースイメージの digest も lock と一致していること (Renovate が Dockerfile
+# 側だけ更新した場合にここで検出する。lock 側の追随は refresh-lock.py が行う)
+BASE_MARKER="/etc/e54c-base-image"
+if [[ -f $BASE_MARKER ]]; then
+	want_base="$(python3 scripts/lock-get.py devcontainer.base_image)"
+	got_base="$(cat "$BASE_MARKER")"
+	if [[ "$got_base" != "$want_base" ]]; then
+		echo "エラー: devcontainer のベースイメージ ($got_base) が" >&2
+		echo "  lock ($want_base) と一致しない。scripts/refresh-lock.py で揃えること" >&2
+		exit 1
+	fi
+fi
 echo "build env verified: snapshot $got"

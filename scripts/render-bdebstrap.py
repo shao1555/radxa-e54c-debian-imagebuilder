@@ -145,6 +145,10 @@ config = {
         ],
         "customize-hooks": customize_hooks,
         "cleanup-hooks": [
+            # mmdebstrap は aptopts を chroot 内の /etc/apt/apt.conf.d/99mmdebstrap
+            # にも保存する。Check-Valid-Until 無効化が成果物に残ると、配備後の
+            # apt が期限切れ Release を受理してしまうため必ず削除する
+            'rm -f "$1/etc/apt/apt.conf.d/99mmdebstrap"',
             # ビルドは snapshot で解決したが、配備後の apt は live リポジトリを
             # 参照させる (security update を受けられるように)。snapshot の URL が
             # 成果物に残ってはいけない (smoke test が検査する)

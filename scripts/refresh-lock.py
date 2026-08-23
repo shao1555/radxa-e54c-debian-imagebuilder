@@ -44,6 +44,19 @@ def main():
     text = LOCK.read_text()
     changed = []
 
+    # --- devcontainer base image ---
+    # Renovate の dockerfile manager は Dockerfile の ARG BASE_IMAGE だけを
+    # 更新するため、lock 側をここで追随させる (真実の源は Dockerfile)
+    dockerfile = (TOP / ".devcontainer" / "Dockerfile").read_text()
+    m = re.search(r"^ARG BASE_IMAGE=(\S+)$", dockerfile, re.M)
+    if not m:
+        print("エラー: Dockerfile に ARG BASE_IMAGE が無い", file=sys.stderr)
+        sys.exit(1)
+    base_image = m.group(1)
+    if lock["devcontainer"]["base_image"] != base_image:
+        text = section_replace(text, "devcontainer", "base_image", base_image)
+        changed.append("devcontainer.base_image")
+
     # --- kernel ---
     ver = lock["kernel"]["version"]
     if "-rc" in ver:
