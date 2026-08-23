@@ -15,17 +15,66 @@ from pathlib import Path
 import yaml
 
 TOP = Path(__file__).resolve().parent.parent
-lock = yaml.safe_load((TOP / "dependencies.lock.yaml").read_text())
 
-if lock.get("schema") != 1:
-    print(f"lock-get: 未対応の schema: {lock.get('schema')!r} (期待: 1)", file=sys.stderr)
-    sys.exit(1)
+# schema 1 で radxa.debs に必ず含まれるべきパッケージ。
+# エントリの丸ごと削除 (メタパッケージだけ消える等) は個別フィールド検証を
+# すり抜けるため、集合として要求する
+RADXA_REQUIRED = {"radxa-archive-keyring", "u-boot-rk2601", "u-boot-radxa-e54c"}
 
 
 def die(msg):
     print(f"lock-get: {msg}", file=sys.stderr)
     sys.exit(1)
 
+
+def check_artifact(name, node):
+    """version/url/sha256 を持つ artifact 節の共通検証"""
+    if not isinstance(node, dict):
+        die(f"{name} が dict でない")
+    for k in ("version", "url", "sha256"):
+        v = str(node.get(k, ""))
+        if not v.strip():
+            die(f"{name}.{k} が空")
+        if re.search(r"[\t\n\r]", v):
+            die(f"{name}.{k} に制御文字 (タブ/改行) が含まれる")
+    if not re.fullmatch(r"[0-9a-f]{64}", node["sha256"]):
+        die(f"{name}.sha256 の書式が不正 (64 桁の hex であること)")
+    if not node["url"].startswith("https://"):
+        die(f"{name}.url が https でない")
+
+
+def validate_lock(lock):
+    """どのキーを取得する場合でも、lock 全体の整合性を先に検証する"""
+    if lock.get("schema") != 1:
+        die(f"未対応の schema: {lock.get('schema')!r} (期待: 1)")
+    check_artifact("kernel", lock.get("kernel"))
+    check_artifact("k3s", lock.get("k3s"))
+    debs = (lock.get("radxa") or {}).get("debs")
+    if not isinstance(debs, list) or not debs:
+        die("radxa.debs が空")
+    seen = set()
+    for e in debs:
+        pkg = str(e.get("package", "?"))
+        for k in ("package", "version", "url", "sha256"):
+            v = str(e.get(k, ""))
+            if not v.strip():
+                die(f"radxa.debs: {pkg} の {k} が空")
+            if re.search(r"[\t\n\r]", v):
+                die(f"radxa.debs: {pkg} の {k} に制御文字が含まれる")
+        if not re.fullmatch(r"[0-9a-f]{64}", e["sha256"]):
+            die(f"radxa.debs: {pkg} の sha256 の書式が不正")
+        if not e["url"].startswith("https://"):
+            die(f"radxa.debs: {pkg} の url が https でない")
+        if pkg in seen:
+            die(f"radxa.debs: package が重複: {pkg}")
+        seen.add(pkg)
+    missing = RADXA_REQUIRED - seen
+    if missing:
+        die(f"radxa.debs に必須パッケージが無い: {', '.join(sorted(missing))}")
+
+
+lock = yaml.safe_load((TOP / "dependencies.lock.yaml").read_text())
+validate_lock(lock)
 
 node = lock
 for part in sys.argv[1].split("."):
@@ -34,18 +83,7 @@ for part in sys.argv[1].split("."):
     node = node[part]
 
 if isinstance(node, list):
-    seen = set()
     for e in node:
-        for k in ("package", "version", "url", "sha256"):
-            if not str(e.get(k, "")).strip():
-                die(f"{sys.argv[1]}: {e.get('package', '?')} の {k} が空")
-        if not re.fullmatch(r"[0-9a-f]{64}", e["sha256"]):
-            die(f"{e['package']}: sha256 の書式が不正")
-        if not e["url"].startswith("https://"):
-            die(f"{e['package']}: url が https でない")
-        if e["package"] in seen:
-            die(f"{sys.argv[1]}: package が重複: {e['package']}")
-        seen.add(e["package"])
         print("\t".join(str(e[k]) for k in ("package", "version", "url", "sha256")))
 else:
     print(node)
