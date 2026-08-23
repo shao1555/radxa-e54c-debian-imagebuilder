@@ -20,6 +20,13 @@ materialize_secrets() {
 	secret_env_vars=""
 	while IFS=$'\t' read -r sid consumer src_name file_env; do
 		[[ -n $sid ]] || continue
+		# E54C_SECRET_FILE_* は fileEnvironment の予約名前空間。source 名が
+		# ここと交差すると export / unset が secret 値とパスを混線させるため
+		# 拒否する (resolver も resolve 時と load 時に同じ規則で拒否する)
+		if [[ $src_name == E54C_SECRET_FILE_* ]]; then
+			echo "エラー: source 環境変数名 $src_name は予約名前空間 (E54C_SECRET_FILE_*) と衝突する" >&2
+			return 1
+		fi
 		if [[ ! -v $src_name ]]; then
 			{
 				echo "エラー: $src_name が未設定です (module '$consumer' の secret '$sid')。"

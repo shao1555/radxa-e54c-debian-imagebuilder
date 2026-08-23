@@ -347,6 +347,51 @@ class ResolverTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("consumer が plan に無い", r.stderr)
 
+    def test_required_secrets_verb_rejects_undeclared(self):
+        # secret 値を読む consumer (build-rootfs.sh) が使う required-secrets verb
+        # 自体が、materialize (副作用) より前に宣言整合で拒否すること
+        _, path = self.plan()
+
+        def mutate(plan):
+            plan["requiredSecrets"] = [{
+                "id": "api-token", "consumer": "beta",
+                "source": {"type": "environment", "name": "X_TOKEN"},
+                "fileEnvironment":
+                    resolver_mod.secret_file_environment("beta", "api-token"),
+            }]
+
+        self.tamper(path, mutate)
+        r = run(self.ws, "required-secrets", "--plan", str(path))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("宣言していない secret", r.stderr)
+        self.assertEqual(r.stdout, "")  # 拒否前に 1 行も出力しない
+
+    def test_manifest_path_tamper_rejected(self):
+        # 宣言整合の根拠となる manifest は canonical path 固定
+        # (plan が指す任意の YAML を宣言の根拠にしない)
+        _, path = self.plan()
+
+        def mutate(plan):
+            alpha = next(m for m in plan["modules"] if m["id"] == "alpha")
+            alpha["manifest"]["path"] = "modules/alpha/hooks/setup.sh"
+
+        self.tamper(path, mutate)
+        r = self.verify(path, "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("canonical", r.stderr)
+
+    def test_verify_request_checks_existing_plan(self):
+        # 既存 plan の本体だけ変更して digest 欄を残した場合、
+        # 「一致」と誤報告せず load_plan の digest 再検算で拒否する
+        _, path = self.plan()
+        plan = json.loads(path.read_text())
+        plan["modules"][0]["packages"]["apt"] = ["evil"]
+        path.write_text(json.dumps(plan, sort_keys=True, indent=2,
+                                   ensure_ascii=False))
+        r = run(self.ws, "verify-request")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("一致しない", r.stderr)
+
     def test_verify_request_stale_detection(self):
         # producer 側の明示的 stale 検査 (consumer の load_plan は行わない):
         # workspace の入力を変えると verify-request が不一致を報告する
@@ -751,6 +796,31 @@ class SecretReferenceTest(unittest.TestCase):
                                                "name": "OTHER_VAR"}}}})
         plan2, _ = self.plan()
         self.assertNotEqual(plan1["digests"]["artifact"], plan2["digests"]["artifact"])
+
+    def test_reserved_source_name_rejected(self):
+        # source 環境変数名は fileEnvironment の予約名前空間と交差できない
+        # (交差すると builder の export / unset が secret 値とパスを混線させる)
+        set_config_yaml(self.ws, secret_refs={
+            "gamma": {"api-token": {"source": {"type": "environment",
+                                               "name": "E54C_SECRET_FILE_FOO"}}}})
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("予約名前空間", r.stderr)
+
+    def test_required_secret_missing_from_plan_rejected(self):
+        # manifest が required: true と宣言する secret を plan から落とす改ざん
+        # (注入の黙殺) は宣言整合の逆方向検査で拒否される
+        _, path = self.plan()
+        plan = json.loads(path.read_text())
+        plan["requiredSecrets"] = []
+        resolver_mod.compute_digests(plan)
+        path.write_text(json.dumps(plan, sort_keys=True, indent=2,
+                                   ensure_ascii=False))
+        r = run(self.ws, "verify-inputs", "--plan", str(path), "--phase", "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("必須 secret", r.stderr)
+        r = run(self.ws, "required-secrets", "--plan", str(path))
+        self.assertNotEqual(r.returncode, 0)
 
     def test_env_name_encoding_no_ambiguity(self):
         # a-b/c と a/b-c は長さプレフィクスで別名になる

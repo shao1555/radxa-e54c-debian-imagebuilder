@@ -535,6 +535,12 @@ def derive_required_secrets(request, selected):
                     " BuildRequest (config.yaml の secretReferences) に無い"
                 )
             continue
+        src_name = ref["source"]["name"]
+        if src_name.startswith("E54C_SECRET_FILE_"):
+            raise ResolveError(
+                f"secretReferences: {mid}/{sid} の source 環境変数名 {src_name} は"
+                " 予約名前空間 (E54C_SECRET_FILE_*) と衝突する"
+            )
         env = secret_file_environment(mid, sid)
         if env in seen_env:
             raise ResolveError(
@@ -720,6 +726,11 @@ def load_plan(workspace, plan_path):
                 f"requiredSecrets: fileEnvironment が符号化規則と一致しない: "
                 f"{s['fileEnvironment']} (期待: {expected_env})"
             )
+        if s["source"]["name"].startswith("E54C_SECRET_FILE_"):
+            raise ResolveError(
+                f"requiredSecrets: source 環境変数名 {s['source']['name']} は"
+                " 予約名前空間 (E54C_SECRET_FILE_*) と衝突する"
+            )
         if s["fileEnvironment"] in seen_env:
             raise ResolveError(
                 f"requiredSecrets: fileEnvironment が重複: {s['fileEnvironment']}"
@@ -759,35 +770,61 @@ def verify_ref(workspace, module, ref, what):
         )
 
 
+def verify_declarations(workspace, plan):
+    """BuildRequest 非依存の宣言整合検査。consumer は plan の config /
+    requiredSecrets を消費する前に必ず呼ぶ (secret の読み出しなど副作用より
+    前に不正 plan を拒否する)。宣言の根拠となる manifest は canonical path を
+    強制し、sha (verify_ref) と構造・identity (load_manifest) まで検証した
+    うえで読む (plan 制御の任意 YAML を宣言の根拠にしない)。
+    - config は当該 module が宣言した schema に適合していること
+    - requiredSecrets の各 entry は consumer の manifest で宣言済みであること
+    - manifest が required: true と宣言する secret は plan に必ず存在すること
+    (値の一致は検査しない: plan は任意の BuildRequest の権威ある結果)"""
+    module_schema = load_schema(workspace, "module.schema.json")
+    for m in plan["modules"]:
+        expected = f"modules/{m['id']}/module.yaml"
+        if m["manifest"]["path"] != expected:
+            raise ResolveError(
+                f"module[{m['id']}] の manifest path が canonical でない: "
+                f"{m['manifest']['path']} (期待: {expected})"
+            )
+        verify_ref(workspace, m, m["manifest"], f"module[{m['id']}] manifest")
+        spec = load_manifest(workspace, workspace / m["source"]["root"], module_schema)
+        conf = load_module_configuration(spec, m["id"])
+        if conf is None:
+            if m["config"] != {}:
+                raise ResolveError(
+                    f"module[{m['id']}] は configuration を宣言していないのに"
+                    " plan に config がある (改ざん)"
+                )
+        else:
+            schema_validate(
+                m["config"], conf["schema"],
+                f"module[{m['id']}] の plan 内 config (宣言 schema との適合)"
+            )
+        declared = spec.get("secrets") or {}
+        entries = [s for s in plan["requiredSecrets"] if s["consumer"] == m["id"]]
+        for sec in entries:
+            if sec["id"] not in declared:
+                raise ResolveError(
+                    f"requiredSecrets: module '{m['id']}' が宣言していない"
+                    f" secret への注入: {sec['id']} (改ざん)"
+                )
+        present = {s["id"] for s in entries}
+        for sid, decl in declared.items():
+            if decl.get("required") and sid not in present:
+                raise ResolveError(
+                    f"module '{m['id']}' の必須 secret '{sid}' が plan の"
+                    " requiredSecrets に無い (改ざんまたは stale)"
+                )
+
+
 def verify_inputs(workspace, plan, phase):
     """phase: hooks | tests.rootfs | tests.boot | all"""
+    if phase in ("hooks", "all"):
+        verify_declarations(workspace, plan)
     for m in plan["modules"]:
         if phase in ("hooks", "all"):
-            verify_ref(workspace, m, m["manifest"], f"module[{m['id']}] manifest")
-            # BuildRequest 非依存の宣言整合 (manifest は直上で sha 検証済み):
-            # - config は当該 module が宣言した schema に適合していること
-            # - requiredSecrets の各 entry は consumer の manifest で宣言済みであること
-            # (値の一致は検査しない: plan は任意の BuildRequest の権威ある結果)
-            spec = yaml.safe_load((workspace / m["manifest"]["path"]).read_text())
-            conf = load_module_configuration(spec, m["id"])
-            if conf is None:
-                if m["config"] != {}:
-                    raise ResolveError(
-                        f"module[{m['id']}] は configuration を宣言していないのに"
-                        " plan に config がある (改ざん)"
-                    )
-            else:
-                schema_validate(
-                    m["config"], conf["schema"],
-                    f"module[{m['id']}] の plan 内 config (宣言 schema との適合)"
-                )
-            declared_sids = set((spec.get("secrets") or {}).keys())
-            for sec in plan["requiredSecrets"]:
-                if sec["consumer"] == m["id"] and sec["id"] not in declared_sids:
-                    raise ResolveError(
-                        f"requiredSecrets: module '{m['id']}' が宣言していない"
-                        f" secret への注入: {sec['id']} (改ざん)"
-                    )
             for ph, refs in m["hooks"].items():
                 for ref in refs:
                     verify_ref(workspace, m, ref, f"module[{m['id']}] hooks.{ph}")
@@ -924,8 +961,10 @@ def main():
             existing_path = workspace / "out/meta/module-plan.json"
             if not existing_path.is_file():
                 die(f"plan が無い: {existing_path} (make resolve)")
-            existing = json.loads(existing_path.read_text())
-            if existing.get("digests", {}).get("plan") != current["digests"]["plan"]:
+            # 既存 plan 本体も load_plan で検証する (本体だけ変更して digest 欄を
+            # 残した plan を「一致」と誤報告しないため)
+            existing = load_plan(workspace, existing_path)
+            if existing["digests"]["plan"] != current["digests"]["plan"]:
                 die("plan が workspace の現在の入力 (config.yaml / modules/) と"
                     "一致しない (stale)\n\nrun: make resolve")
             info("plan は workspace の現在の入力と一致 (verify-request OK)")
@@ -940,6 +979,12 @@ def main():
             return
 
         plan = load_plan(workspace, args.plan)
+        # config / requiredSecrets を消費する verb は、出力 (とその先の副作用:
+        # secret の読み出し等) より前に宣言整合を検査する
+        # (verify-inputs の hooks / all phase は verify_inputs 内で実施する)
+        if args.cmd in ("required-secrets", "login-config", "module-config",
+                        "write-configs", "list-tests"):
+            verify_declarations(workspace, plan)
         if args.cmd == "explain":
             print(f"target: {plan['target']['board']} ({plan['target']['architecture']}, "
                   f"{plan['target']['suite']})")

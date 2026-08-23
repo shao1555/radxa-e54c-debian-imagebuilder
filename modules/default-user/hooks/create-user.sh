@@ -17,8 +17,11 @@ pw_file="${E54C_SECRET_FILE_M12_DEFAULT_USER_S16_INITIAL_PASSWORD:?secret file �
 
 # パスワード固有の形式検証はこの consumer が行う (framework は secret を
 # opaque なバイト列として扱う)。chpasswd は行区切りで解釈するため
-# 空・CR/LF を拒否する
-password="$(cat "$pw_file")"
+# 空・CR/LF を拒否する。command substitution は末尾の改行を黙って落とす
+# (= 改行入り secret を暗黙変更して設定してしまう) ため、sentinel を付けて
+# ファイル内容を byte-exact に読んでから検査する
+raw="$(cat "$pw_file"; printf x)"
+password="${raw%x}"
 if [[ -z $password ]]; then
 	echo "エラー: initial-password が空 (chpasswd に渡せない)" >&2
 	exit 1

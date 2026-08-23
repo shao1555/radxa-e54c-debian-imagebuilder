@@ -160,6 +160,10 @@ module 固有の secret 定義は framework コードにハードコードされ
   (長さプレフィクスで境界を一意化。例: `default-user` / `initial-password` →
   `E54C_SECRET_FILE_M12_DEFAULT_USER_S16_INITIAL_PASSWORD`)。
   生成名の全体重複も検査される
+- `E54C_SECRET_FILE_*` は fileEnvironment の**予約名前空間**であり、source の
+  環境変数名がここと交差する参照は拒否される (resolve 時・plan load 時・
+  builder の materialize 時の三重で検査する。交差を許すと export / unset が
+  secret 値とファイルパスを混線させ得る)
 - **注意**: secret ファイルパスの capability は同一ビルド内の全 hook が読める。
   MVP では組み込みモジュールを単一の trust domain として許容しており、
   外部モジュール対応前に per-hook の隔離 (sanitized environment /
@@ -240,10 +244,16 @@ build / test / Release の全 consumer はこの plan だけを参照する
   - load 時: schema・3 digest の再検算、root = `modules/<id>` 固定と実体検証、
     requiredSecrets の内部不変条件 (consumer が plan 内 module であること、
     `fileEnvironment` が符号化規則と一致すること、重複が無いこと)
-  - verify-inputs (hooks phase): manifest を sha 検証したうえで、plan 内 config
-    が manifest の宣言 schema に適合すること、requiredSecrets の各 entry が
-    consumer の manifest で宣言済みであることを検査する。利用する path の
-    module-root containment / type / mode / digest も利用直前に再検証する
+  - 宣言整合 (verify_declarations): manifest を canonical path
+    (`modules/<id>/module.yaml`) 固定で sha・構造・identity まで検証したうえで、
+    plan 内 config が manifest の宣言 schema に適合すること、requiredSecrets の
+    各 entry が consumer の manifest で宣言済みであること、manifest が
+    `required: true` と宣言する secret が plan に存在することを検査する。
+    config / requiredSecrets を消費する CLI verb (required-secrets /
+    login-config / module-config / write-configs / list-tests) は、出力とその先の
+    副作用 (secret の読み出し等) より**前**にこの検査を行う
+  - verify-inputs (hooks phase): 宣言整合に加えて、利用する path の
+    module-root containment / type / mode / digest を利用直前に再検証する
     (「Resolver が生成した plan だから安全」とは仮定しない)。
     不一致は `module plan is stale` として拒否され、`make resolve` で再生成する
 - plan が workspace の**現在の入力**と一致するかの stale 検査は producer 側の

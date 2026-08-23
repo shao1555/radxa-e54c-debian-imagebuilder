@@ -102,6 +102,17 @@ else
 	echo "ok: 未設定 source は明示的に失敗する"
 fi
 
+# --- source 名が予約名前空間 (E54C_SECRET_FILE_*) と交差したら失敗する ---
+env_h="$(enc module-h token)"
+export E54C_SECRET_FILE_FOO="value"
+if (materialize_secrets "$DIR" <<< "$(printf 'token\tmodule-h\tE54C_SECRET_FILE_FOO\t%s' "$env_h")") 2> /dev/null; then
+	echo "NG: 予約名前空間の source 名でも成功してしまった" >&2
+	fail=1
+else
+	echo "ok: 予約名前空間の source 名は明示的に失敗する"
+fi
+unset E54C_SECRET_FILE_FOO
+
 if [[ $fail -eq 0 ]]; then
 	echo "secret materialize tests: PASSED"
 fi
