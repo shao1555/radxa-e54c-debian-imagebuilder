@@ -101,21 +101,32 @@ done <<< "$module_boot_tests"
 tar -cf "$WORK/boot-tests.tar" -C "$BUNDLE" .
 
 # core login harness は「この成果物へ既定ユーザーでログインできること」の
-# integration test であり、default-user の解決済み config (username /
-# requirePasswordChange) を検証済み consumer API (module-config) から取得する。
-# default-user が選択されていない構成ではログイン手段を仮定できないため、
-# 黙って実行せず明示的に失敗させる (別の access provider は profile 導入時に設計)
-du_config="$(python3 "$TOP/scripts/resolve-modules.py" module-config \
-	--plan "$PLAN" --module default-user 2> /dev/null)" || {
-	echo "エラー: core login harness requires an access provider" >&2
-	echo "  (default-user モジュールが plan に含まれていない)" >&2
+# integration test であり、ログイン情報 (username / requirePasswordChange /
+# 初期パスワードの source 環境変数名) を検証済み consumer API (login-config)
+# から取得する。default-user が選択されていない構成ではログイン手段を仮定
+# できないため、黙って実行せず明示的に失敗させる (verb 側が
+# "core login harness requires an access provider" で die する)
+login_config="$(python3 "$TOP/scripts/resolve-modules.py" login-config --plan "$PLAN")"
+IFS=$'\t' read -r login_user require_change pw_src <<< "$login_config"
+
+# 初期パスワードの値は plan に含まれない (設計)。build と同じ provider
+# (requiredSecrets の source 環境変数) から取得する: build に渡した値と
+# harness が試す値が乖離しない。ローカルは .env、CI は workflow の env が設定する
+if [[ -f "$TOP/.env" ]]; then
+	# shellcheck source=/dev/null
+	source "$TOP/.env"
+fi
+[[ -n $pw_src ]] || { echo "エラー: plan に initial-password の secret reference が無い" >&2; exit 1; }
+if [[ ! -v $pw_src ]]; then
+	echo "エラー: $pw_src が未設定です (login harness が初期パスワードを取得できない)。" >&2
+	echo "  ローカル: cp .env.example .env して $pw_src を設定 (CI は workflow が設定)" >&2
 	exit 1
-}
-login_user="$(python3 -c "import json, sys; print(json.loads(sys.argv[1])['username'])" "$du_config")"
-require_change="$(python3 -c "import json, sys; print(str(json.loads(sys.argv[1])['requirePasswordChange']).lower())" "$du_config")"
-# 初期パスワードの値は plan に含まれない (設計)。harness は既定 debian を使い、
-# 変更したビルドでは BOOT_TEST_PASSWORD で上書きする
-BOOT_TEST_PASSWORD="${BOOT_TEST_PASSWORD:-debian}"
+fi
+# 値は argv に載せない (プロセス一覧から見えるため)。0600 の一時ファイルに
+# 書き、expect にはパスだけを渡す
+pw_file="$WORK/initial-password"
+(umask 077 && printf '%s' "${!pw_src}" > "$pw_file")
+unset "$pw_src"
 
 expect "$TOP/scripts/boot-test.expect" "$IMG" "$WORK/boot-tests.tar" "$SSH_PORT" \
-	"$login_user" "$BOOT_TEST_PASSWORD" "$require_change"
+	"$login_user" "$pw_file" "$require_change"

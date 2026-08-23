@@ -293,19 +293,70 @@ class ResolverTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("source.root が不正", r.stderr)
 
-    def test_required_secrets_tamper_rejected(self):
-        # 注入先 (consumer) の付け替えを拒否 (secret isolation の維持)
+    def test_required_secrets_consumer_tamper_rejected(self):
+        # 注入先 (consumer) を secret を宣言していない module へ付け替える改ざん。
+        # 権威モデルでは load_plan は plan 内部不変条件のみ検査するため、符号化の
+        # 辻褄を合わせた entry は load を通るが、verify-inputs の BuildRequest
+        # 非依存検査 (consumer の manifest 宣言との整合) で拒否される
         _, path = self.plan()
 
         def mutate(plan):
-            plan["requiredSecrets"] = [
-                {"name": "DEFAULT_PASSWORD", "consumer": "beta", "source": "environment"}
-            ]
+            plan["requiredSecrets"] = [{
+                "id": "api-token", "consumer": "beta",
+                "source": {"type": "environment", "name": "X_TOKEN"},
+                "fileEnvironment":
+                    resolver_mod.secret_file_environment("beta", "api-token"),
+            }]
 
         self.tamper(path, mutate)
-        r = self.verify(path)
+        r = self.verify(path, "hooks")
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("requiredSecrets", r.stderr)
+        self.assertIn("宣言していない secret", r.stderr)
+
+    def test_required_secrets_file_env_tamper_rejected(self):
+        # fileEnvironment の符号化改ざん (別 module の名前空間を指す) は
+        # load_plan の内部不変条件で拒否される
+        _, path = self.plan()
+
+        def mutate(plan):
+            plan["requiredSecrets"] = [{
+                "id": "api-token", "consumer": "beta",
+                "source": {"type": "environment", "name": "X_TOKEN"},
+                "fileEnvironment":
+                    resolver_mod.secret_file_environment("alpha", "api-token"),
+            }]
+
+        self.tamper(path, mutate)
+        r = self.verify(path, "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("符号化規則", r.stderr)
+
+    def test_required_secrets_unknown_consumer_rejected(self):
+        _, path = self.plan()
+
+        def mutate(plan):
+            plan["requiredSecrets"] = [{
+                "id": "api-token", "consumer": "ghost",
+                "source": {"type": "environment", "name": "X_TOKEN"},
+                "fileEnvironment":
+                    resolver_mod.secret_file_environment("ghost", "api-token"),
+            }]
+
+        self.tamper(path, mutate)
+        r = self.verify(path, "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("consumer が plan に無い", r.stderr)
+
+    def test_verify_request_stale_detection(self):
+        # producer 側の明示的 stale 検査 (consumer の load_plan は行わない):
+        # workspace の入力を変えると verify-request が不一致を報告する
+        self.plan()
+        r = run(self.ws, "verify-request")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (self.ws / "modules/alpha/hooks/setup.sh").write_text("#!/bin/sh\nexit 9\n")
+        r = run(self.ws, "verify-request")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("make resolve", r.stderr)
 
     def test_modules_dir_symlink_rejected(self):
         # modules/ 自体を workspace 外への symlink に置換 → resolve も load も拒否
@@ -593,6 +644,50 @@ class ConfigurationTest(unittest.TestCase):
         r, _ = resolve(self.ws)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_nested_required_satisfied_by_override(self):
+        # defaults は deep.k を満たさない (defaults 検証は required を再帰的に
+        # 除いた schema で行うため通る) が、最終 config の検証は required を
+        # 強制するので override 無しでは拒否され、override で満たせば通る
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(
+            self.ws,
+            defaults={"name": "abc", "nested": {"a": 1}, "deep": {}},
+            schema_extra={"deep": {"type": "object", "additionalProperties": False,
+                                   "required": ["k"],
+                                   "properties": {"k": {"type": "integer"}}}})
+        self.assert_fail("schema 違反")
+        set_config_yaml(self.ws, module_config={"gamma": {"deep": {"k": 5}}},
+                        secret_refs=GAMMA_REF)
+        plan, _ = self.plan()
+        self.assertEqual(self.gamma(plan)["config"]["deep"], {"k": 5})
+
+    def tamper_config(self, path, name_value):
+        plan = json.loads(path.read_text())
+        g = next(m for m in plan["modules"] if m["id"] == "gamma")
+        g["config"]["name"] = name_value
+        resolver_mod.compute_digests(plan)
+        path.write_text(json.dumps(plan, sort_keys=True, indent=2,
+                                   ensure_ascii=False))
+
+    def test_authoritative_config_value_not_rechecked(self):
+        # 権威モデルの文書化テスト: plan の config 値が現在の config.yaml から
+        # 導出される値と違っても、宣言 schema に適合する限り consumer は受理する
+        # (profile 由来など、別 BuildRequest から生成した plan を拒否しないため。
+        # workspace との stale 検査は producer 側の verify-request が担う)
+        _, path = self.plan()
+        self.tamper_config(path, "zzz")
+        r = run(self.ws, "verify-inputs", "--plan", str(path), "--phase", "all")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_config_schema_violation_in_plan_rejected(self):
+        # plan 内 config が宣言 schema に違反する改ざんは verify-inputs で拒否
+        # (digest の辻褄を合わせても manifest の宣言 schema との適合で落ちる)
+        _, path = self.plan()
+        self.tamper_config(path, "ABC")  # pattern ^[a-z]+$ 違反
+        r = run(self.ws, "verify-inputs", "--plan", str(path), "--phase", "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("plan 内 config", r.stderr)
+
 
 class SecretReferenceTest(unittest.TestCase):
     def setUp(self):
@@ -663,10 +758,10 @@ class SecretReferenceTest(unittest.TestCase):
             resolver_mod.secret_file_environment("a-b", "c"),
             resolver_mod.secret_file_environment("a", "b-c"))
 
-    def test_alternate_username_plumbing(self):
-        # harness が hard-coded username に依存しない配線の軽量検証:
-        # default-user 相当の module に別 username を設定し、
-        # module-config CLI が解決済み username を返すこと
+    def test_login_config_plumbing(self):
+        # boot harness の配線の軽量検証 (QEMU 無し): login-config verb が
+        # plan の解決済み username / requirePasswordChange / 初期パスワードの
+        # source 環境変数名を返す (harness は hard-coded debian に依存しない)
         d = self.ws / "modules" / "default-user"
         (d / "hooks").mkdir(parents=True)
         import yaml as _yaml
@@ -675,20 +770,40 @@ class SecretReferenceTest(unittest.TestCase):
             "metadata": {"id": "default-user"},
             "configuration": {
                 "schema": {"type": "object", "additionalProperties": False,
-                           "required": ["username"],
-                           "properties": {"username": {"type": "string"}}},
-                "defaults": {"username": "debian"},
+                           "required": ["username", "requirePasswordChange"],
+                           "properties": {
+                               "username": {"type": "string"},
+                               "requirePasswordChange": {"type": "boolean"}}},
+                "defaults": {"username": "debian", "requirePasswordChange": True},
             },
+            "secrets": {"initial-password": {"required": True}},
         }
         (d / "module.yaml").write_text(_yaml.safe_dump(spec))
-        set_config_yaml(self.ws,
-                        module_config={"default-user": {"username": "student"}},
-                        secret_refs=GAMMA_REF)
+        set_config_yaml(
+            self.ws,
+            module_config={"default-user": {"username": "student",
+                                            "requirePasswordChange": False}},
+            secret_refs={**GAMMA_REF,
+                         "default-user": {"initial-password": {
+                             "source": {"type": "environment",
+                                        "name": "MY_PASS"}}}})
         _, path = self.plan()
+        r = run(self.ws, "login-config", "--plan", str(path))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "student\tfalse\tMY_PASS")
+        # module-config 経由の consumer (smoke test 等) も同じ値を見る
         r = run(self.ws, "module-config", "--plan", str(path),
                 "--module", "default-user")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["username"], "student")
+
+    def test_login_config_requires_access_provider(self):
+        # default-user が plan に無い構成ではログイン手段を仮定できないため、
+        # login harness は黙って走らず明示的に失敗する
+        _, path = self.plan()
+        r = run(self.ws, "login-config", "--plan", str(path))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("access provider", r.stderr)
 
 
 if __name__ == "__main__":

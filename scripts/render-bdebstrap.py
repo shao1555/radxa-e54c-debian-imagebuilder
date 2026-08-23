@@ -20,6 +20,7 @@ module rootfs.customize は boot finalize より前 (initramfs / extlinux に影
 """
 import argparse
 import json
+import shlex
 import sys
 import yaml
 from pathlib import Path
@@ -98,11 +99,14 @@ def module_hook_cmd(m, h):
     E54C_MODULE_ID とその module の解決済み config (canonical JSON ファイルの
     パス) だけを渡す。secret の値は環境に一切現れない: hook は自 module の
     fileEnvironment 変数 (build-rootfs.sh が 0600 の一時ファイルパスを export)
-    からファイルを読む。生成 YAML に値もパスも埋め込まれない"""
+    からファイルを読む。生成 YAML に値もパスも埋め込まれない。
+    パスは shell に埋め込まれるため shlex.quote で符号化する
+    (workspace のパスに空白や記号が含まれても行が壊れない)"""
+    cfg_path = str(config_dir / f"{m['id']}.json")
     return (
-        f'E54C_MODULE_ID={m["id"]} '
-        f'E54C_MODULE_CONFIG="{config_dir}/{m["id"]}.json" '
-        f'"{h}" "$1"'
+        f'E54C_MODULE_ID={shlex.quote(m["id"])} '
+        f'E54C_MODULE_CONFIG={shlex.quote(cfg_path)} '
+        f'{shlex.quote(h)} "$1"'
     )
 
 

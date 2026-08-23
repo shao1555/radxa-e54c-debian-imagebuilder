@@ -147,8 +147,15 @@ module 固有の secret 定義は framework コードにハードコードされ
 - plan には**参照情報のみ** (`requiredSecrets`) が記録され、値は resolve 時に
   読み取りすらしない。値・値の単純 hash を plan / ログ / 生成 YAML /
   cache key に含めない
-- builder は値を 0600 の一時ファイルに置き、そのパスを `fileEnvironment`
-  変数で hook から読めるようにする。値そのものはどのプロセスの環境にも現れない
+- builder は値を 0600 の一時ファイル (ファイル名 = `fileEnvironment` 名。
+  module namespace 込みで衝突しない) に置き、そのパスを `fileEnvironment`
+  変数で hook から読めるようにする。全 secret を materialize してから参照元の
+  環境変数を一括で unset するため、複数 secret が同じ source を共有できるし、
+  値そのものはどのプロセスの環境にも現れない
+- framework は secret を **opaque なバイト列**として扱い、「参照元が未設定」
+  以外の検証はしない。形式検証 (空・改行の拒否など) は用途を知る consumer の
+  hook が行う (例: default-user は chpasswd の行区切り仕様のため空と CR/LF を
+  拒否する)
 - `fileEnvironment` 名は framework が module ID / secret ID から決定的に生成する
   (長さプレフィクスで境界を一意化。例: `default-user` / `initial-password` →
   `E54C_SECRET_FILE_M12_DEFAULT_USER_S16_INITIAL_PASSWORD`)。
@@ -226,11 +233,22 @@ build / test / Release の全 consumer はこの plan だけを参照する
 
 - plan は workspace 相対 path と content digest (sha256) を持ち、
   absolute path / timestamp / secret 値を含まない (byte-identical に再生成できる)
-- consumer は plan を**自プロセス内で** load (schema・digest 再検算・root /
-  requiredSecrets 検証) し、利用する path の module-root containment / type /
-  mode / digest を利用直前に再検証する
-  (「Resolver が生成した plan だから安全」とは仮定しない)。
-  不一致は `module plan is stale` として拒否され、`make resolve` で再生成する
+- plan は「**任意の BuildRequest** から Resolver が生成した権威ある解決結果」
+  である。consumer は現在の `config.yaml` (BuildRequest) と値を照合**しない**
+  (照合すると profile など別 BuildRequest 由来の plan を拒否してしまう)。
+  consumer の検査は BuildRequest に依存しないものに限る:
+  - load 時: schema・3 digest の再検算、root = `modules/<id>` 固定と実体検証、
+    requiredSecrets の内部不変条件 (consumer が plan 内 module であること、
+    `fileEnvironment` が符号化規則と一致すること、重複が無いこと)
+  - verify-inputs (hooks phase): manifest を sha 検証したうえで、plan 内 config
+    が manifest の宣言 schema に適合すること、requiredSecrets の各 entry が
+    consumer の manifest で宣言済みであることを検査する。利用する path の
+    module-root containment / type / mode / digest も利用直前に再検証する
+    (「Resolver が生成した plan だから安全」とは仮定しない)。
+    不一致は `module plan is stale` として拒否され、`make resolve` で再生成する
+- plan が workspace の**現在の入力**と一致するかの stale 検査は producer 側の
+  明示的な verb `verify-request` (フル再解決して `digests.plan` を比較) が担う。
+  plan には生成元の `buildRequestDigest` が記録され、由来の監査に使える
 - **plan の真正性の範囲**: 自己 digest は破損・不整合な変更を検出するが、
   digest ごと再計算できる作成者に対する「署名」ではない。ModulePlan は
   CI artifact など信頼できる経路で受け渡される権威ある解決結果として扱い、

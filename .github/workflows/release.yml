@@ -228,6 +228,7 @@ jobs:
           docker run --rm -v "$PWD":/ws -w /ws \
             "${{ needs.devcontainer.outputs.image }}" bash -c '
             python3 scripts/tests/test_resolver.py &&
+            scripts/tests/test-secret-materialize.sh &&
             python3 scripts/resolve-modules.py resolve --output out/meta/module-plan.json'
           echo "artifact-digest=$(docker run --rm -v "$PWD":/ws -w /ws \
             "${{ needs.devcontainer.outputs.image }}" \
@@ -244,7 +245,7 @@ jobs:
           # モジュール起因の再構築判定は plan の artifact digest が担う
           # (test のみの変更では digest が変わらず rootfs を再利用できる)。
           # kernel deb のキー (seed 含む) と devcontainer イメージ識別子も含める
-          key: rootfs-${{ runner.arch }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ steps.plan.outputs.artifact-digest }}-${{ hashFiles('config.yaml', 'packages.txt', 'dependencies.lock.yaml', 'scripts/lock-get.py', 'files/**', 'hooks/**', 'schemas/**', 'scripts/build-rootfs.sh', 'scripts/verify-build-env.sh', 'scripts/render-bdebstrap.py', 'scripts/resolve-modules.py', 'scripts/module_plan.py', '.github/workflows/release.yml') }}
+          key: rootfs-${{ runner.arch }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ steps.plan.outputs.artifact-digest }}-${{ hashFiles('config.yaml', 'packages.txt', 'dependencies.lock.yaml', 'scripts/lock-get.py', 'files/**', 'hooks/**', 'schemas/**', 'scripts/build-rootfs.sh', 'scripts/secrets-lib.sh', 'scripts/verify-build-env.sh', 'scripts/render-bdebstrap.py', 'scripts/resolve-modules.py', 'scripts/module_plan.py', '.github/workflows/release.yml') }}
 
       - name: Download kernel debs
         if: steps.rootfs.outputs.cache-hit != 'true'
@@ -481,8 +482,11 @@ jobs:
 
       - name: Boot test
         run: |
+          # DEFAULT_PASSWORD: login harness は plan の secret reference と同じ
+          # source から初期パスワードを取得する (rootfs job の build と同値を渡す)
           docker run --rm --privileged \
             -v "$PWD":/ws -w /ws \
+            -e DEFAULT_PASSWORD=debian \
             "${{ needs.devcontainer-amd64.outputs.image }}" \
             bash -c 'scripts/boot-test.sh out/*.img.xz'
 

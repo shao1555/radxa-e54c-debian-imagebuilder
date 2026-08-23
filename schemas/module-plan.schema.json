@@ -10,6 +10,7 @@
     "kind",
     "target",
     "selection",
+    "buildRequestDigest",
     "modules",
     "requiredSecrets",
     "digests"
@@ -240,6 +241,9 @@
           "$ref": "#/$defs/sha256"
         }
       }
+    },
+    "buildRequestDigest": {
+      "$ref": "#/$defs/sha256"
     }
   },
   "$defs": {

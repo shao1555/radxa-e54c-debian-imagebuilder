@@ -28,8 +28,10 @@ resolve:
 	python3 scripts/resolve-modules.py resolve --output out/meta/module-plan.json
 
 # resolver の fixture テスト (determinism / traversal / tampering の異常系)
+# + shell 側の secret materialize テスト
 test-resolver:
 	python3 scripts/tests/test_resolver.py
+	scripts/tests/test-secret-materialize.sh
 
 # resolver テスト + rootfs.tar の回帰検査
 check: test-resolver

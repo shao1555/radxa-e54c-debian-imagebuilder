@@ -65,34 +65,15 @@ fi
 [[ -f $PLAN ]] || { echo "エラー: module-plan が無い: $PLAN (make resolve)" >&2; exit 1; }
 
 # secret input の汎用処理 (plan の requiredSecrets を処理する。module ID の
-# 特別扱いはしない)。値は環境に一切残さず、0600 の一時ファイルに置いて
-# fileEnvironment (パス変数) だけを consumer hook から読める形で export する
+# 特別扱いはしない)。materialize の規約と実装は scripts/secrets-lib.sh を参照
+# (framework は secret を opaque に扱い、衝突フリーなファイル名 =
+#  fileEnvironment に置いて参照元環境変数を一括 unset する)
+# shellcheck source=scripts/secrets-lib.sh
+source scripts/secrets-lib.sh
 SECRETS_DIR="$(mktemp -d)"
 trap 'rm -rf "$SECRETS_DIR"' EXIT
-secret_env_vars=""
 required_secrets="$(python3 scripts/resolve-modules.py required-secrets --plan "$PLAN")"
-while IFS=$'\t' read -r sid consumer src_name file_env; do
-	[[ -n $sid ]] || continue
-	value="${!src_name:-}"
-	if [[ -z $value ]]; then
-		cat >&2 <<- EOF
-		エラー: $src_name が未設定です (module '$consumer' の secret '$sid')。
-		  ローカルビルド: cp .env.example .env して $src_name を設定してください
-		  (CI は workflow が設定します)
-		EOF
-		exit 1
-	fi
-	# chpasswd 等は行区切りで解釈するため、CR/LF を含む値は事故のもとなので拒否する
-	if [[ $value == *$'\n'* || $value == *$'\r'* ]]; then
-		echo "エラー: $src_name に改行 (CR/LF) を含めることはできません" >&2
-		exit 1
-	fi
-	(umask 077 && printf '%s' "$value" > "$SECRETS_DIR/$sid")
-	export "${file_env}=$SECRETS_DIR/$sid"
-	secret_env_vars="${secret_env_vars:+$secret_env_vars,}${file_env}"
-	# 値そのものは必ず環境から外す (bdebstrap 配下の全 hook が継承するのを防ぐ)
-	unset "$src_name"
-done <<< "$required_secrets"
+materialize_secrets "$SECRETS_DIR" <<< "$required_secrets"
 # sudo 経由の場合、secret ファイルのパス変数だけを通す (値そのものは通らない)
 if [[ -n $secret_env_vars && $EUID -ne 0 ]]; then
 	SUDO="sudo --preserve-env=${secret_env_vars}"

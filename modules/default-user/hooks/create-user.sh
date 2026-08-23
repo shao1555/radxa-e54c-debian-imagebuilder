@@ -15,9 +15,22 @@ require_change="$(python3 -c 'import json, os; print(str(json.load(open(os.envir
 # default-user / initial-password の fileEnvironment (符号化規則より)
 pw_file="${E54C_SECRET_FILE_M12_DEFAULT_USER_S16_INITIAL_PASSWORD:?secret file が渡されていない}"
 
+# パスワード固有の形式検証はこの consumer が行う (framework は secret を
+# opaque なバイト列として扱う)。chpasswd は行区切りで解釈するため
+# 空・CR/LF を拒否する
+password="$(cat "$pw_file")"
+if [[ -z $password ]]; then
+	echo "エラー: initial-password が空 (chpasswd に渡せない)" >&2
+	exit 1
+fi
+if [[ $password == *$'\n'* || $password == *$'\r'* ]]; then
+	echo "エラー: initial-password に改行 (CR/LF) を含めることはできません" >&2
+	exit 1
+fi
+
 chroot "$ROOT" useradd -m -s /bin/bash -G sudo "$username"
 # dash の echo は \n 等を解釈してしまうため、固定書式の printf を使う
-printf '%s:%s\n' "$username" "$(cat "$pw_file")" | chroot "$ROOT" chpasswd
+printf '%s:%s\n' "$username" "$password" | chroot "$ROOT" chpasswd
 if [[ $require_change == true ]]; then
 	# 初期パスワードは周知の値になり得るため、初回ログイン時に変更を強制する
 	chroot "$ROOT" chage -d 0 "$username"

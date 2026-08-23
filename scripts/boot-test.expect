@@ -5,17 +5,22 @@
 # して boot テスト bundle (core + module tests + dispatcher の tar) を実行し、
 # 最後にホスト側から実際の SSH ログイン (hostfwd 経由) を検証する。
 # username 等は plan の解決済み config から boot-test.sh が渡す
-# (hard-coded な debian を前提にしない)。
+# (hard-coded な debian を前提にしない)。初期パスワードは argv に載せず
+# (プロセス一覧から見えるため) 0600 の一時ファイルのパスで受け取る。
 # 引数: <イメージ (raw)> <bundle (tar)> <SSH 転送ポート>
-#       <ログインユーザー名> <初期パスワード> <requirePasswordChange (true|false)>
+#       <ログインユーザー名> <初期パスワードのファイルパス> <requirePasswordChange (true|false)>
 
 set timeout 900
 set img [lindex $argv 0]
 set chk [lindex $argv 1]
 set sshport [lindex $argv 2]
 set login_user [lindex $argv 3]
-set initpass [lindex $argv 4]
+set pwfile [lindex $argv 4]
 set require_change [lindex $argv 5]
+set pf [open $pwfile r]
+fconfigure $pf -translation binary
+set initpass [read $pf]
+close $pf
 set newpass "BootTest-Passw0rd"
 
 spawn qemu-system-aarch64 \
