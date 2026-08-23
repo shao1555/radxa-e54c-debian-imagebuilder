@@ -27,8 +27,12 @@ echo "boot test 対象: $img_xz"
 # ホスト→ゲストの SSH ログイン試験に使う転送ポート (127.0.0.1 のみ bind)
 ssh_port="${BOOT_TEST_SSH_PORT:-2222}"
 
-export LIBGUESTFS_BACKEND=direct
-[[ -e /dev/kvm ]] || export LIBGUESTFS_BACKEND_SETTINGS=force_tcg
+# libguestfs の設定は guestfish 呼び出しだけにスコープする。global export に
+# すると、同名 (^[A-Z][A-Z0-9_]*$ は schema 上有効) を secret source に使う
+# 構成で外部から渡された値を上書きしてしまう。framework は builder プロセスの
+# 環境変数を書き換えない (source 参照は実環境をそのまま見る) のが契約
+libguestfs_env=(LIBGUESTFS_BACKEND=direct)
+[[ -e /dev/kvm ]] || libguestfs_env+=(LIBGUESTFS_BACKEND_SETTINGS=force_tcg)
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -49,7 +53,7 @@ Name=en*
 [Network]
 DHCP=yes
 EOF
-guestfish -a "$img" << EOF
+env "${libguestfs_env[@]}" guestfish -a "$img" << EOF
 run
 mount /dev/sda3 /
 download /boot/extlinux/extlinux.conf $work/extlinux.conf
