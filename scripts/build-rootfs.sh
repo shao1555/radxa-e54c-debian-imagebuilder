@@ -55,11 +55,15 @@ echo "kernel deb preflight passed: $(basename "$img_deb")"
 # ビルド環境の snapshot 固定が lock と一致しているか (fail-fast)
 scripts/verify-build-env.sh
 
-# canonical ModulePlan の生成 (このビルドで唯一の resolve。以後の全 consumer は
-# plan だけを参照する) + 利用直前の入力再検証 (containment / type / mode / digest)
+# canonical ModulePlan は make resolve (または CI の resolve ステップ) が
+# pipeline ごとに一度だけ生成する。ここでは再生成せず、既存 plan を必須として
+# 利用直前の入力再検証 (containment / type / mode / digest) だけを行う
 PLAN="$TOP/out/meta/module-plan.json"
-mkdir -p "$TOP/out/meta"
-python3 scripts/resolve-modules.py resolve --output "$PLAN"
+if [[ "${1:-}" == "--plan" ]]; then
+	PLAN="$2"
+	shift 2
+fi
+[[ -f $PLAN ]] || { echo "エラー: module-plan が無い: $PLAN (make resolve)" >&2; exit 1; }
 python3 scripts/resolve-modules.py verify-inputs --plan "$PLAN" --phase all
 
 # secret input の汎用処理 (plan の requiredSecrets を処理する。module ID の

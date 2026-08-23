@@ -321,31 +321,46 @@ def check_overlay_conflicts(workspace, modules):
             placed[key] = (owner, e["type"])
 
 
+def artifact_digest_of(plan):
+    """artifact digest (rootfs へ影響する解決済み入力) を plan 本体から導出する
+    純粋関数。resolve 時の生成と load 時の再検算の両方がこれを使う。
+    requiredSecrets も含める (注入先の改ざんが digest 照合で検出されるように)"""
+    return canonical_digest(
+        {
+            "target": plan["target"],
+            "configuration": {},
+            "requiredSecrets": plan["requiredSecrets"],
+            "modules": [
+                {
+                    "id": m["id"],
+                    "packages": m["packages"],
+                    "overlays": m["overlays"],
+                    "hooks": m["hooks"],
+                    "config": m["config"],
+                }
+                for m in plan["modules"]
+            ],
+        }
+    )
+
+
+def tests_digest_of(plan):
+    """tests digest を plan 本体から導出する純粋関数"""
+    return canonical_digest(
+        [
+            {"module": m["id"], "phase": phase, **ref}
+            for m in plan["modules"]
+            for phase in SUPPORTED_TEST_PHASES
+            for ref in m["tests"].get(phase, [])
+        ]
+    )
+
+
 def compute_digests(plan):
     """10. artifact / tests / plan の 3 種の digest"""
-    artifact_input = {
-        "target": plan["target"],
-        "configuration": {},
-        "modules": [
-            {
-                "id": m["id"],
-                "packages": m["packages"],
-                "overlays": m["overlays"],
-                "hooks": m["hooks"],
-                "config": m["config"],
-            }
-            for m in plan["modules"]
-        ],
-    }
-    tests_input = [
-        {"module": m["id"], "phase": phase, **ref}
-        for m in plan["modules"]
-        for phase in SUPPORTED_TEST_PHASES
-        for ref in m["tests"].get(phase, [])
-    ]
     plan["digests"] = {
-        "artifact": canonical_digest(artifact_input),
-        "tests": canonical_digest(tests_input),
+        "artifact": artifact_digest_of(plan),
+        "tests": tests_digest_of(plan),
         "plan": "",
     }
     without_plan = json.loads(json.dumps(plan))
@@ -354,28 +369,41 @@ def compute_digests(plan):
     return plan
 
 
-def resolve(workspace):
-    request = load_build_request(workspace)
-    module_schema = load_schema(workspace, "module.schema.json")
-    mod_dirs = discover_modules(workspace)
+def expected_secrets(module_ids):
+    """選択済み module 集合から期待される requiredSecrets (集中定義から導出)"""
+    return [
+        {"name": s["name"], "consumer": mid, "source": s["source"]}
+        for mid in module_ids
+        for s in BUILTIN_SECRETS.get(mid, [])
+    ]
 
-    modules = []
+
+def resolve(workspace):
+    # 各段階の中間値を明示する (将来 selection / configuration / dependencies を
+    # 差し込む位置をデータフローとして固定するため)
+    request = load_build_request(workspace)                      # 1
+    module_schema = load_schema(workspace, "module.schema.json")
+
+    candidates = []                                              # 2-3. 発見 + manifest 検証
     seen = set()
-    for mod_dir in mod_dirs:  # 9. 実行順 = 辞書順 (discover が sorted 済み)
+    for mod_dir in discover_modules(workspace):
         spec = load_manifest(workspace, mod_dir, module_schema)
         mid = spec["metadata"]["id"]
         if mid in seen:
             raise ResolveError(f"module ID が重複: {mid}")
         seen.add(mid)
-        modules.append(resolve_module(workspace, mod_dir, spec))
+        candidates.append({"id": mid, "dir": mod_dir, "spec": spec})
 
-    check_overlay_conflicts(workspace, modules)
+    selected = select_modules(request, candidates)               # 4
+    configured = resolve_configuration(request, selected)        # 5
+    expanded = resolve_dependencies(configured)                  # 6
 
-    required_secrets = [
-        {"name": s["name"], "consumer": m["id"], "source": s["source"]}
-        for m in modules
-        for s in BUILTIN_SECRETS.get(m["id"], [])
-    ]
+    # 7. filesystem input の検証は「最終的に選択された module」に対して行う
+    # (将来 dependency 解決で module が追加されても、この段階が後段にある)
+    modules = [resolve_module(workspace, c["dir"], c["spec"]) for c in expanded]
+
+    check_overlay_conflicts(workspace, modules)                  # 8
+    modules = order_modules(modules)                             # 9
 
     plan = {
         "apiVersion": API_VERSION,
@@ -383,12 +411,34 @@ def resolve(workspace):
         "target": request["target"],
         "selection": {"mode": "all-builtin", "profile": None},
         "modules": modules,
-        "requiredSecrets": required_secrets,
+        "requiredSecrets": expected_secrets([m["id"] for m in modules]),
         "digests": {},
     }
-    compute_digests(plan)
+    compute_digests(plan)                                        # 10
     schema_validate(plan, load_schema(workspace, "module-plan.schema.json"), "ModulePlan")
     return plan
+
+
+def select_modules(request, candidates):
+    """4. module 選択 (MVP: all-builtin。profile はここに差し込む)"""
+    assert request["selection"]["mode"] == "all-builtin"
+    return list(candidates)
+
+
+def resolve_configuration(request, selected):
+    """5. configuration の解決 (MVP: 空)"""
+    return selected
+
+
+def resolve_dependencies(configured):
+    """6. dependencies / capabilities / conflicts の解決 (MVP: 恒等)"""
+    return configured
+
+
+def order_modules(modules):
+    """9. 決定的な実行順 (MVP: module ID の辞書順。dependency 導入後は
+    topological order との決定的な統合をここで行う)"""
+    return sorted(modules, key=lambda m: m["id"])
 
 
 def write_plan_atomic(plan, output):
@@ -410,11 +460,39 @@ def write_plan_atomic(plan, output):
 def load_plan(workspace, plan_path):
     plan = json.loads(Path(plan_path).read_text())
     schema_validate(plan, load_schema(workspace, "module-plan.schema.json"), "ModulePlan")
-    # digests.plan の自己整合 (plan 自体の改ざん検出)
+    # 全 digest を本体から再検算して照合する (どれか 1 つだけ更新した改ざん
+    # plan が sidecar 照合や cache key を通過するのを防ぐ)
     without_plan = json.loads(json.dumps(plan))
     del without_plan["digests"]["plan"]
-    if canonical_digest(without_plan) != plan["digests"]["plan"]:
-        raise ResolveError("plan の digests.plan が本体と一致しない (改ざんまたは破損)")
+    checks = [
+        ("plan", canonical_digest(without_plan)),
+        ("artifact", artifact_digest_of(plan)),
+        ("tests", tests_digest_of(plan)),
+    ]
+    for kind, expected in checks:
+        if plan["digests"][kind] != expected:
+            raise ResolveError(
+                f"plan の digests.{kind} が本体と一致しない (改ざんまたは破損)"
+            )
+    # module root は builtin では modules/<id> に固定し、実体も検証する
+    # (改ざん plan が root を scripts/ や別 module に差し替えるのを拒否)
+    modules_root = (workspace / "modules").resolve(strict=True)
+    for m in plan["modules"]:
+        expected_root = f"modules/{m['id']}"
+        if m["source"]["root"] != expected_root:
+            raise ResolveError(
+                f"module[{m['id']}] の source.root が不正: {m['source']['root']} "
+                f"(builtin は {expected_root} 固定)"
+            )
+        d = workspace / expected_root
+        if d.is_symlink() or not d.is_dir():
+            raise ResolveError(f"module[{m['id']}] の root がディレクトリとして存在しない")
+        if not d.resolve(strict=True).is_relative_to(modules_root):
+            raise ResolveError(f"module[{m['id']}] の root が modules/ の外を指している")
+    # requiredSecrets は選択済み module から期待される宣言 (集中定義) と
+    # 完全一致すること (注入先・取得元の改ざんを拒否)
+    if plan["requiredSecrets"] != expected_secrets([m["id"] for m in plan["modules"]]):
+        raise ResolveError("plan の requiredSecrets が組み込み定義と一致しない (改ざん)")
     return plan
 
 
@@ -458,12 +536,18 @@ def verify_inputs(workspace, plan, phase):
                 for ref in refs:
                     verify_ref(workspace, m, ref, f"module[{m['id']}] hooks.{ph}")
             for ov in m["overlays"]:
+                what = f"module[{m['id']}] overlay"
+                check_rel_string(ov["source"], what)
                 src = workspace / ov["source"]
                 if src.is_symlink() or not src.is_dir():
+                    raise ResolveError(f"{what} source が不正: {ov['source']}")
+                # overlay source も当該 module root 内であること
+                mod_root_r = (workspace / m["source"]["root"]).resolve(strict=True)
+                if not src.resolve(strict=True).is_relative_to(mod_root_r):
                     raise ResolveError(
-                        f"module[{m['id']}] overlay source が不正: {ov['source']}"
+                        f"{what} source が当該 module root の外: {ov['source']}"
                     )
-                actual = overlay_entries(workspace, src, f"module[{m['id']}] overlay")
+                actual = overlay_entries(workspace, src, what)
                 if actual != ov["entries"]:
                     raise ResolveError(
                         f"module plan is stale:\n  {ov['source']} (overlay 内容が変化)"

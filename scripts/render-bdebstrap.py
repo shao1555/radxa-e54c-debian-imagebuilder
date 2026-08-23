@@ -59,7 +59,11 @@ for line in (TOP / "packages.txt").read_text().splitlines():
 
 deb = cfg["debian"]
 ub = cfg["uboot"]
-suite = deb["suite"]
+# target identity (suite / architecture) は plan を実行時の正とする
+# (別 BuildRequest から生成した plan でも、plan の target どおりの rootfs が
+#  その artifact digest で記録されるように)
+suite = plan["target"]["suite"]
+architecture = plan["target"]["architecture"]
 components = " ".join(deb["components"])
 
 # ビルド時のパッケージ解決は dependencies.lock.yaml の snapshot に固定する。
@@ -179,7 +183,7 @@ module_seal_hooks = [
 
 config = {
     "mmdebstrap": {
-        "architectures": ["arm64"],
+        "architectures": [architecture],
         "suite": suite,
         "target": "rootfs.tar",
         "mode": "root",

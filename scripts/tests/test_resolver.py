@@ -18,6 +18,13 @@ from pathlib import Path
 TOP = Path(__file__).resolve().parent.parent.parent
 RESOLVER = TOP / "scripts" / "resolve-modules.py"
 
+# digest の辻褄合わせに resolver の純粋関数を使う (改ざんテスト用)
+import importlib.util as _ilu
+
+_spec = _ilu.spec_from_file_location("resolver_mod", RESOLVER)
+resolver_mod = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(resolver_mod)
+
 
 def make_workspace(tmp):
     """最小の fixture workspace (module 2 個) を構築する"""
@@ -230,15 +237,11 @@ class ResolverTest(unittest.TestCase):
         return run(self.ws, "verify-inputs", "--plan", str(path), "--phase", phase)
 
     def tamper(self, path, mutate):
+        """全 digest (artifact / tests / plan) の辻褄を合わせた改ざん plan を作る
+        (digest 再検算を通過させ、containment 等の後段検証を直接テストするため)"""
         plan = json.loads(path.read_text())
         mutate(plan)
-        # digests.plan を再計算して「schema/自己整合は通る」改ざん plan を作る
-        import hashlib
-        without = json.loads(json.dumps(plan))
-        del without["digests"]["plan"]
-        data = json.dumps(without, sort_keys=True, separators=(",", ":"),
-                          ensure_ascii=False).encode()
-        plan["digests"]["plan"] = "sha256:" + hashlib.sha256(data).hexdigest()
+        resolver_mod.compute_digests(plan)
         path.write_text(json.dumps(plan, sort_keys=True, indent=2, ensure_ascii=False))
 
     def test_verify_ok(self):
@@ -254,6 +257,72 @@ class ResolverTest(unittest.TestCase):
         r = self.verify(path)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("digests.plan", r.stderr)
+
+    def test_artifact_digest_tamper_detected(self):
+        # packages を変更し digests.plan だけ更新 (artifact は旧値のまま) →
+        # artifact の再検算で拒否される (sidecar 照合や cache key の偽装防止)
+        _, path = self.plan()
+        plan = json.loads(path.read_text())
+        plan["modules"][0]["packages"]["apt"] = ["evil"]
+        without = json.loads(json.dumps(plan))
+        del without["digests"]["plan"]
+        plan["digests"]["plan"] = resolver_mod.canonical_digest(without)
+        path.write_text(json.dumps(plan, sort_keys=True, indent=2, ensure_ascii=False))
+        r = self.verify(path)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("digests.artifact", r.stderr)
+
+    def test_root_tamper_rejected(self):
+        # source.root を scripts/ に差し替え、全 digest の辻褄を合わせても拒否
+        _, path = self.plan()
+        (self.ws / "scripts").mkdir(exist_ok=True)
+
+        def mutate(plan):
+            plan["modules"][0]["source"]["root"] = "scripts"
+
+        self.tamper(path, mutate)
+        r = self.verify(path)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("source.root が不正", r.stderr)
+
+    def test_root_tamper_to_other_module_rejected(self):
+        _, path = self.plan()
+
+        def mutate(plan):
+            plan["modules"][0]["source"]["root"] = "modules/beta"
+
+        self.tamper(path, mutate)
+        r = self.verify(path)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("source.root が不正", r.stderr)
+
+    def test_required_secrets_tamper_rejected(self):
+        # 注入先 (consumer) の付け替えを拒否 (secret isolation の維持)
+        _, path = self.plan()
+
+        def mutate(plan):
+            plan["requiredSecrets"] = [
+                {"name": "DEFAULT_PASSWORD", "consumer": "beta", "source": "environment"}
+            ]
+
+        self.tamper(path, mutate)
+        r = self.verify(path)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("requiredSecrets", r.stderr)
+
+    def test_overlay_source_tamper_to_other_module_rejected(self):
+        _, path = self.plan()
+
+        def mutate(plan):
+            alpha = next(m for m in plan["modules"] if m["id"] == "alpha")
+            beta = next(m for m in plan["modules"] if m["id"] == "beta")
+            alpha["overlays"][0]["source"] = "modules/beta/files"
+            alpha["overlays"][0]["entries"] = beta["overlays"][0]["entries"]
+
+        self.tamper(path, mutate)
+        r = self.verify(path, "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("module root の外", r.stderr)
 
     def test_plan_path_to_other_module_rejected(self):
         _, path = self.plan()

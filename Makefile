@@ -18,7 +18,8 @@ all: kernel rootfs image
 kernel:
 	scripts/build-kernel.sh
 
-rootfs:
+# plan は resolve が pipeline ごとに一度だけ生成し、build/test はそれを参照する
+rootfs: resolve
 	scripts/build-rootfs.sh
 	scripts/smoke-test-rootfs.sh
 
