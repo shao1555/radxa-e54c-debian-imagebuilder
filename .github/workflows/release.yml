@@ -226,7 +226,7 @@ jobs:
           # 入力の変更で古い rootfs キャッシュが再利用されるのを防ぐ)。
           # kernel deb のキー (seed 含む) と devcontainer イメージ識別子も含め、
           # カーネルやビルド環境が変わったのに旧 rootfs を再利用しないようにする
-          key: rootfs-${{ runner.arch }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ hashFiles('config.yaml', 'packages.txt', 'dependencies.lock.yaml', 'scripts/lock-get.py', 'files/**', 'hooks/**', 'scripts/build-rootfs.sh', 'scripts/verify-build-env.sh', 'scripts/render-bdebstrap.py', '.github/workflows/release.yml') }}
+          key: rootfs-${{ runner.arch }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ hashFiles('config.yaml', 'packages.txt', 'dependencies.lock.yaml', 'scripts/lock-get.py', 'files/**', 'hooks/**', 'modules/**', 'scripts/build-rootfs.sh', 'scripts/verify-build-env.sh', 'scripts/render-bdebstrap.py', 'scripts/resolve-modules.py', '.github/workflows/release.yml') }}
 
       - name: Download kernel debs
         if: steps.rootfs.outputs.cache-hit != 'true'
@@ -298,12 +298,15 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # provenance 用: ビルド環境 (devcontainer) のパッケージ一覧
+      # provenance 用: ビルド環境 (devcontainer) のパッケージ一覧と
+      # 解決済みモジュール一覧 (キャッシュヒット経路でも必ず生成する)
       - name: Build environment manifest
         run: |
           mkdir -p out/meta
           docker run --rm "${{ needs.devcontainer.outputs.image }}" \
             dpkg-query -W -f '${Package}=${Version}\n' > out/meta/build-env-arm64.txt
+          docker run --rm -v "$PWD":/ws -w /ws "${{ needs.devcontainer.outputs.image }}" \
+            python3 scripts/resolve-modules.py --resolved out/meta/resolved-modules.yaml
 
       - name: Upload rootfs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -320,6 +323,7 @@ jobs:
             out/rootfs/build/manifest
             out/rootfs/bdebstrap.yaml
             out/meta/build-env-arm64.txt
+            out/meta/resolved-modules.yaml
           if-no-files-found: error
 
   # ステージ 3: イメージ組み立て (guestfish)。rootfs.tar だけを入力に取る。

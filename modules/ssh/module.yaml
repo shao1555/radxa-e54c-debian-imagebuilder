@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-2.0-only
+apiVersion: e54c.image/v1alpha1
+kind: Module
+
+metadata:
+  id: ssh
+  description: OpenSSH による管理アクセス
+
+packages:
+  apt:
+    - openssh-server
+
+overlays:
+  - source: files
+    target: /
+
+hooks:
+  # ビルド時に生成された SSH ホスト鍵の除去。焼き込むと全端末が同一の
+  # サーバー鍵を共有してしまう。初回起動時の生成は trixie 標準の
+  # sshd-keygen.service (ConditionFirstBoot) に任せる
+  rootfs.seal:
+    - hooks/remove-host-keys.sh
+
+tests:
+  rootfs:
+    - tests/rootfs.sh
+  boot:
+    - tests/boot.sh

@@ -68,6 +68,11 @@ echo "kernel deb preflight passed: $(basename "$img_deb")"
 # ビルド環境の snapshot 固定が lock と一致しているか (fail-fast)
 scripts/verify-build-env.sh
 
+# モジュールの解決 (検証込みの fail-fast) と provenance の生成。
+# render-bdebstrap.py も同じ resolver を使って packages / overlay / hook を配線する
+mkdir -p "$TOP/out/meta"
+python3 scripts/resolve-modules.py --resolved "$TOP/out/meta/resolved-modules.yaml"
+
 python3 scripts/render-bdebstrap.py "$OUT"
 
 # Radxa の deb (keyring / U-Boot) は apt 解決せず、dependencies.lock.yaml で

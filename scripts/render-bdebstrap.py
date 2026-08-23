@@ -1,10 +1,25 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""config.yaml + packages.txt + files/ + hooks/ から bdebstrap 設定を生成する。
+"""config.yaml + packages.txt + files/ + hooks/ + modules/ から bdebstrap 設定を生成する。
 
 rsdk の rootfs.jsonnet に相当するが、単一ボード・単一エディションなので
 jsonnet を使わず素直な Python で組み立てる。
+
+モジュール (Issue #7) の順序契約 (正: docs/modules.md):
+  パッケージ導入 (mmdebstrap + 自前 deb)
+  → core / module overlay
+  → legacy customize hooks (render 内の core 系列 + hooks/customize.d)
+  → module rootfs.customize
+  → framework boot finalize (update-initramfs → u-boot-update)
+  → module rootfs.seal
+  → core final seal (machine-id / apt 設定 / sources 書き戻し等の framework invariant)
+  → tar 生成
+module rootfs.customize は boot finalize より前 (initramfs / extlinux に影響する
+変更を反映できる位置)。core final seal は必ずモジュールより後に実行する
+(モジュールが core の封印処理後に成果物を書き戻せない順序にするため)。
 """
+import json
+import subprocess
 import sys
 import yaml
 from pathlib import Path
@@ -12,6 +27,16 @@ from pathlib import Path
 TOP = Path(__file__).resolve().parent.parent
 cfg = yaml.safe_load((TOP / "config.yaml").read_text())
 out_dir = Path(sys.argv[1]).resolve()  # 例: out/rootfs
+
+# モジュールの解決 (検証込み。不正があればここで fail-fast する)
+modules = json.loads(
+    subprocess.run(
+        [sys.executable, str(TOP / "scripts" / "resolve-modules.py"), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+)
 
 packages = []
 for line in (TOP / "packages.txt").read_text().splitlines():
@@ -72,8 +97,10 @@ customize_hooks = [
     'printf "Package: *\\nPin: origin radxa-repo.github.io\\nPin-Priority: -1\\n\\n'
     'Package: u-boot-* radxa-archive-keyring\\nPin: origin radxa-repo.github.io\\n'
     'Pin-Priority: 500\\n" > "$1/etc/apt/preferences.d/radxa-uboot-only"',
-    # files/ overlay をそのまま重ねる
+    # core / module overlay をそのまま重ねる (同一フェーズで適用する。
+    # 同一パスへの配置は resolve-modules.py が build 前に競合として拒否済み)
     f'if [ -d "{TOP}/files" ]; then cp -a "{TOP}/files/." "$1/"; fi',
+    *[f'cp -a "{ov}/." "$1/"' for m in modules for ov in m["overlays"]],
     # hostname
     f'echo "{cfg["image"]["hostname"]}" > "$1/etc/hostname"',
     f'echo "127.0.1.1\t{cfg["image"]["hostname"]}" >> "$1/etc/hosts"',
@@ -103,6 +130,16 @@ customize_hooks = [
     # コンソールを洪水にするのを防ぐ (警告/エラーと systemd のブート表示は残る)
     'echo "rw loglevel=5 console=tty1 console=ttyS2,1500000n8" > "$1/etc/kernel/cmdline"',
     'echo \'U_BOOT_PARAMETERS="$(cat /etc/kernel/cmdline)"\' >> "$1/etc/default/u-boot"',
+    # module rootfs.customize (legacy hooks の後、framework boot finalize の前)。
+    # initramfs / extlinux に影響する変更 (firmware、/etc/initramfs-tools/、
+    # cmdline、DT overlay 等) を initramfs 生成前に反映できる位置に置く。
+    # 実行ビットは resolver が検証済みで、shebang を尊重して直接実行する
+    *[
+        f'"{h}" "$1"'
+        for m in modules
+        for h in m["hooks"].get("rootfs.customize", [])
+    ],
+    # --- framework boot finalize (initramfs → extlinux の順を固定) ---
     # カーネル導入後の起動整備。initramfs を先に確定させてから extlinux.conf を
     # 生成する (逆順だと initrd 行が欠けた extlinux.conf になり得る)。
     # 失敗は握りつぶさず、成果物 (initrd / extlinux.conf) の実在まで確認する
@@ -114,6 +151,13 @@ customize_hooks = [
     '{ echo "エラー: extlinux.conf が生成されていない" >&2; exit 1; }',
     'grep -q "initrd" "$1/boot/extlinux/extlinux.conf" || '
     '{ echo "エラー: extlinux.conf に initrd 行が無い (起動不能になる)" >&2; exit 1; }',
+]
+
+# module rootfs.seal → core final seal の順で cleanup-hooks を構成する。
+# core final seal (machine-id / apt 設定 / sources 書き戻し等の framework
+# invariant) は必ずモジュールより後 (モジュールが封印後の成果物を書き戻せない)
+module_seal_hooks = [
+    f'"{h}" "$1"' for m in modules for h in m["hooks"].get("rootfs.seal", [])
 ]
 
 config = {
@@ -142,9 +186,13 @@ config = {
             # radxa の keyring / U-Boot は apt 解決しない (dependencies.lock.yaml
             # で固定した deb を customize hook が dpkg で投入する)
             *packages,
+            # モジュールが宣言するパッケージ (modules/*/module.yaml の packages.apt)
+            *(p for m in modules for p in m["packages"]),
         ],
         "customize-hooks": customize_hooks,
         "cleanup-hooks": [
+            *module_seal_hooks,
+            # --- ここから core final seal (モジュールより後で実行する) ---
             # mmdebstrap は aptopts を chroot 内の /etc/apt/apt.conf.d/99mmdebstrap
             # にも保存する。Check-Valid-Until 無効化が成果物に残ると、配備後の
             # apt が期限切れ Release を受理してしまうため必ず削除する
@@ -161,10 +209,7 @@ config = {
             # systemd-resolved postinst が退避した .bak) を除去し、resolved の
             # stub への symlink に置き換える。単に削除するだけだと初回起動時に
             # glibc が /etc/resolv.conf を見つけられず DNS 解決が壊れる
-            # ビルド時に生成された SSH ホスト鍵を削除する。焼き込むと全端末が
-            # 同一のサーバー鍵を共有してしまう。初回起動時に trixie 標準の
-            # sshd-keygen.service が端末固有の鍵を生成する
-            'rm -f "$1/etc/ssh/ssh_host_"*',
+            # (SSH ホスト鍵の除去は modules/ssh の rootfs.seal hook に移行済み)
             'rm -f "$1/etc/resolv.conf" "$1/etc/.resolv.conf.systemd-resolved.bak"',
             'ln -s ../run/systemd/resolve/stub-resolv.conf "$1/etc/resolv.conf"',
             'rm -rf "$1/var/lib/apt/lists"/*',

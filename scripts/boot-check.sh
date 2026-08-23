@@ -1,25 +1,15 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
-# QEMU ゲスト内で root として実行される検査スクリプト。
-# boot-test.expect がシリアル経由で転送・実行する。
+# QEMU ゲスト内で root として実行される core 検査 (boot テスト bundle の一部)。
+# boot-test.sh が bundle (core + module tests + dispatcher) として転送する。
 # 注意: シリアル転送のため各行は短く保つこと (長い行は端末で折返し事故になる)
-fail=0
-chk() {
-	desc="$1"
-	cmd="$2"
-	if sh -c "$cmd" > /dev/null 2>&1; then
-		echo "BOOTCHK ok: $desc"
-	else
-		echo "BOOTCHK NG: $desc"
-		fail=1
-	fi
-}
+# shellcheck source=boot-test-lib.sh
+. "$E54C_BOOT_TEST_LIB"
 
 chk "自前カーネルで起動 (e54c1)" 'uname -r | grep -q e54c1'
 chk "AppArmor 有効" '[ "$(cat /sys/module/apparmor/parameters/enabled)" = Y ]'
 chk "systemd-networkd 稼働" 'systemctl is-active systemd-networkd'
 chk "systemd-resolved 稼働" 'systemctl is-active systemd-resolved'
-chk "sshd 稼働" 'systemctl is-active ssh'
 # chk は sh -c で実行するため、外側のシェル変数は参照できない (パスは直書き)
 chk "resolv.conf が stub symlink" \
 	'[ "$(readlink /etc/resolv.conf)" = ../run/systemd/resolve/stub-resolv.conf ]'
@@ -89,4 +79,4 @@ chk "k3s バイナリ実行可" 'k3s --version'
 chk "k3s が enable されていない" '[ "$(systemctl is-enabled k3s)" = disabled ]'
 chk "k3s が起動していない" '[ "$(systemctl is-active k3s)" = inactive ]'
 
-echo "BOOTTEST_RESULT=$fail"
+exit "$fail"
