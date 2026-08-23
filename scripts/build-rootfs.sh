@@ -69,11 +69,16 @@ python3 scripts/render-bdebstrap.py "$OUT"
 
 # Radxa の deb (keyring / U-Boot) は apt 解決せず、dependencies.lock.yaml で
 # 固定した URL から取得して sha256 検証する (customize hook が dpkg で投入する)。
-# mmdebstrap は radxa リポジトリに一切触れないため、keyring の事前準備も不要
+# mmdebstrap は radxa リポジトリに一切触れないため、keyring の事前準備も不要。
+# process substitution だと lock-get の失敗 (フィールド欠落等) が while に
+# 伝播しないため、先に変数へ受けて set -e で止まるようにする
+radxa_lock="$(python3 scripts/lock-get.py radxa.debs)"
 RADXA_DEBS="$OUT/radxa-debs"
 mkdir -p "$RADXA_DEBS"
+expected_debs=()
 while IFS=$'\t' read -r pkg ver url sha; do
 	deb="$RADXA_DEBS/$(basename "$url")"
+	expected_debs+=("$(basename "$url")")
 	if [[ ! -f $deb ]] || ! sha256sum -c --status <<< "$sha  $deb" 2> /dev/null; then
 		echo "downloading $pkg $ver ..."
 		curl -fL "$url" -o "$deb"
@@ -84,8 +89,26 @@ while IFS=$'\t' read -r pkg ver url sha; do
 		rm -f "$deb"
 		exit 1
 	}
-done < <(python3 scripts/lock-get.py radxa.debs)
-echo "radxa debs verified: $(ls "$RADXA_DEBS")"
+	# deb のメタデータが lock の記載と一致することも確認する
+	# (URL の貼り間違いで「検証は通るが別物」になる事故を防ぐ)
+	deb_pkg="$(dpkg-deb -f "$deb" Package)"
+	deb_ver="$(dpkg-deb -f "$deb" Version)"
+	if [[ "$deb_pkg" != "$pkg" || "$deb_ver" != "$ver" ]]; then
+		echo "エラー: $deb の中身 ($deb_pkg $deb_ver) が lock の記載 ($pkg $ver) と違う" >&2
+		exit 1
+	fi
+done <<< "$radxa_lock"
+# lock に無いファイル (旧版など) が staging に残っていると customize hook の
+# dpkg -i *.deb に混入するため、掃除する
+for f in "$RADXA_DEBS"/*.deb; do
+	[[ -e $f ]] || continue
+	name="$(basename "$f")"
+	if [[ ! " ${expected_debs[*]} " == *" $name "* ]]; then
+		echo "removing stale $name (lock に無い)"
+		rm -f "$f"
+	fi
+done
+echo "radxa debs verified: ${expected_debs[*]}"
 
 $SUDO bdebstrap -c "$OUT/bdebstrap.yaml" \
 	--name "$OUT/build" \

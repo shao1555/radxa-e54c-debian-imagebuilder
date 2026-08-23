@@ -104,7 +104,7 @@ jobs:
         run: |
           python3 -c "import yaml" 2> /dev/null || pip install --quiet PyYAML
           ksec="$(python3 -c "import yaml, json, hashlib; k = yaml.safe_load(open('config.yaml'))['kernel']; print(hashlib.sha256(json.dumps(k, sort_keys=True).encode()).hexdigest()[:16])")"
-          echo "key=kernel-debs-${{ runner.arch }}-${ksec}-${{ needs.devcontainer.outputs.seed }}-${{ hashFiles('kernel/**', 'scripts/build-kernel.sh', 'dependencies.lock.yaml') }}" >> "$GITHUB_OUTPUT"
+          echo "key=kernel-debs-${{ runner.arch }}-${ksec}-${{ needs.devcontainer.outputs.seed }}-${{ hashFiles('kernel/**', 'scripts/build-kernel.sh', 'dependencies.lock.yaml', 'scripts/lock-get.py') }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore kernel debs
         id: debs
@@ -170,7 +170,7 @@ jobs:
           # 入力の変更で古い rootfs キャッシュが再利用されるのを防ぐ)。
           # kernel deb のキー (seed 含む) と devcontainer イメージ識別子も含め、
           # カーネルやビルド環境が変わったのに旧 rootfs を再利用しないようにする
-          key: rootfs-${{ runner.arch }}-${{ steps.date.outputs.date }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ hashFiles('config.yaml', 'packages.txt', 'dependencies.lock.yaml', 'files/**', 'hooks/**', 'scripts/build-rootfs.sh', 'scripts/render-bdebstrap.py', '.github/workflows/release.yml') }}
+          key: rootfs-${{ runner.arch }}-${{ steps.date.outputs.date }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ hashFiles('config.yaml', 'packages.txt', 'dependencies.lock.yaml', 'scripts/lock-get.py', 'files/**', 'hooks/**', 'scripts/build-rootfs.sh', 'scripts/render-bdebstrap.py', '.github/workflows/release.yml') }}
 
       - name: Download kernel debs
         if: steps.rootfs.outputs.cache-hit != 'true'
