@@ -244,7 +244,7 @@ jobs:
           # モジュール起因の再構築判定は plan の artifact digest が担う
           # (test のみの変更では digest が変わらず rootfs を再利用できる)。
           # kernel deb のキー (seed 含む) と devcontainer イメージ識別子も含める
-          key: rootfs-${{ runner.arch }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ steps.plan.outputs.artifact-digest }}-${{ hashFiles('config.yaml', 'packages.txt', 'dependencies.lock.yaml', 'scripts/lock-get.py', 'files/**', 'hooks/**', 'schemas/**', 'scripts/build-rootfs.sh', 'scripts/verify-build-env.sh', 'scripts/render-bdebstrap.py', 'scripts/resolve-modules.py', '.github/workflows/release.yml') }}
+          key: rootfs-${{ runner.arch }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ steps.plan.outputs.artifact-digest }}-${{ hashFiles('config.yaml', 'packages.txt', 'dependencies.lock.yaml', 'scripts/lock-get.py', 'files/**', 'hooks/**', 'schemas/**', 'scripts/build-rootfs.sh', 'scripts/verify-build-env.sh', 'scripts/render-bdebstrap.py', 'scripts/resolve-modules.py', 'scripts/module_plan.py', '.github/workflows/release.yml') }}
 
       - name: Download kernel debs
         if: steps.rootfs.outputs.cache-hit != 'true'
