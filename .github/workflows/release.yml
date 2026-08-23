@@ -83,6 +83,11 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       packages: read
+    outputs:
+      # rootfs ジョブがキャッシュキーに含める (新 seed で kernel deb が変わった
+      # のに rootfs が同日分の旧キャッシュにヒットして古いカーネル入り rootfs を
+      # リリースするのを防ぐ)
+      debs-key: ${{ steps.key.outputs.key }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -162,8 +167,10 @@ jobs:
         with:
           path: out/rootfs
           # workflow 自体もキーに含める (DEFAULT_PASSWORD 等、この場で決まる
-          # 入力の変更で古い rootfs キャッシュが再利用されるのを防ぐ)
-          key: rootfs-${{ runner.arch }}-${{ steps.date.outputs.date }}-${{ hashFiles('config.yaml', 'packages.txt', 'files/**', 'hooks/**', 'kernel/**', 'scripts/build-kernel.sh', 'scripts/build-rootfs.sh', 'scripts/render-bdebstrap.py', '.github/workflows/release.yml') }}
+          # 入力の変更で古い rootfs キャッシュが再利用されるのを防ぐ)。
+          # kernel deb のキー (seed 含む) と devcontainer イメージ識別子も含め、
+          # カーネルやビルド環境が変わったのに旧 rootfs を再利用しないようにする
+          key: rootfs-${{ runner.arch }}-${{ steps.date.outputs.date }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ hashFiles('config.yaml', 'packages.txt', 'files/**', 'hooks/**', 'scripts/build-rootfs.sh', 'scripts/render-bdebstrap.py', '.github/workflows/release.yml') }}
 
       - name: Download kernel debs
         if: steps.rootfs.outputs.cache-hit != 'true'
