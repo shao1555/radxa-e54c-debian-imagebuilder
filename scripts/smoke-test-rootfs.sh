@@ -100,6 +100,20 @@ check "lan1 の .network 設定"             '\./etc/systemd/network/10-lan1\.ne
 # 通常ファイルも「^-(種別) + フルパス + 行末 $」で固定し、.bak/.old 等への
 # 誤一致を防ぐ。実行が必要なものは実行ビット (^-rwx) まで確認する
 check "カーネル (vmlinuz)"                 '^-.* \./boot/vmlinuz-[0-9][^ ]*$'
+# vmlinuz は非圧縮の ARM64 Image であること。bindeb-pkg の既定 (Image.gz) に
+# 戻ると vendor U-Boot 2017.09 は booti の gzip 展開に未対応でブート不能になる。
+# 先頭 2 バイトが gzip magic (1f 8b) でなく、offset 56 に "ARM\x64" があること
+vmlinuz_member="$(tar -tf "$TAR" | grep -E '^\./boot/vmlinuz-[0-9]' | head -1 || true)"
+# head -c が先にパイプを閉じると tar が SIGPIPE になるため || true で受ける
+# (od/tr は完走しており出力は完全)
+vmlinuz_hdr="$(tar -xOf "$TAR" "$vmlinuz_member" 2> /dev/null | head -c 64 \
+	| od -An -v -tx1 | tr -d ' \n' || true)"
+if [[ ${vmlinuz_hdr:0:4} != "1f8b" && ${vmlinuz_hdr:112:8} == "41524d64" ]]; then
+	echo "ok: vmlinuz が非圧縮の ARM64 Image (vendor U-Boot は gzip 非対応)"
+else
+	echo "NG: vmlinuz が非圧縮 ARM64 Image でない (先頭=${vmlinuz_hdr:0:4} magic@56=${vmlinuz_hdr:112:8})"
+	fail=1
+fi
 check "initrd"                             '^-.* \./boot/initrd\.img-[0-9][^ ]*$'
 check "E54C の DTB"                        '^-.* \./usr/lib/linux-image-[^ ]*/rockchip/rk3582-radxa-e54c\.dtb$'
 check "extlinux.conf (u-boot-update 生成)" '^-.* \./boot/extlinux/extlinux\.conf$'

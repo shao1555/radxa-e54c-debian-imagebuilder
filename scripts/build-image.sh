@@ -141,7 +141,18 @@ if ! grep -qE '^No problems found\.' "$TMP/sgdisk-v"; then
 	exit 1
 fi
 
-# 4. U-Boot が読めない ext4 フィーチャーが紛れ込んでいないこと
+# 4. GPT の legacy_boot 属性 (bit2)。QEMU ブートテストはホストの u-boot-qemu で
+#    ブートするため、将来の U-Boot が非 bootable パーティションも走査するように
+#    なると欠落を検出できない。実機 (vendor U-Boot) の要件として静的に固定する
+for p in 2 3; do
+	attr="$(LC_ALL=C sgdisk -i "$p" "$IMG" | awk '/Attribute flags:/{print $3}')"
+	if (( (16#${attr:-0} & 4) == 0 )); then
+		echo "NG: パーティション $p に legacy_boot 属性 (bit2) が無い (attr=${attr:-取得失敗})" >&2
+		exit 1
+	fi
+done
+
+# 5. U-Boot が読めない ext4 フィーチャーが紛れ込んでいないこと
 #    (mke2fs.conf の既定変更などで再発し得るため、成果物で確認する)
 feat="$(guestfish --ro -a "$IMG" run : tune2fs-l /dev/sda3 | grep -i '^Filesystem features:')"
 if grep -qE 'orphan_file|metadata_csum_seed' <<< "$feat"; then
@@ -149,7 +160,7 @@ if grep -qE 'orphan_file|metadata_csum_seed' <<< "$feat"; then
 	exit 1
 fi
 
-# 5. rootfs のファイルシステム整合性 (--ro なのでイメージは変更されない)
+# 6. rootfs のファイルシステム整合性 (--ro なのでイメージは変更されない)
 fsck_status="$(guestfish --ro -a "$IMG" run : fsck ext4 /dev/sda3 | tail -1)"
 if [[ "$fsck_status" != "0" ]]; then
 	echo "NG: e2fsck がエラーを報告 (status=$fsck_status)" >&2

@@ -180,7 +180,8 @@ jobs:
   # システム操作のみなので、x86_64 アプライアンスで arm64 イメージを扱ってよい
   image:
     needs: rootfs
-    runs-on: ubuntu-latest
+    # ホストの guestfish / e2fsprogs の挙動に依存するため、ランナーは固定する
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
@@ -229,7 +230,8 @@ jobs:
   # ランナーは x64 でよい (KVM は libguestfs の前処理にだけ効く)
   boot-test:
     needs: image
-    runs-on: ubuntu-latest
+    # ホストの qemu / u-boot-qemu の挙動に依存するため、ランナーは固定する
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -248,7 +250,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-arm qemu-utils u-boot-qemu ipxe-qemu expect \
-            libguestfs-tools xz-utils
+            openssh-client libguestfs-tools xz-utils
           sudo chmod +r /boot/vmlinuz-*
 
       - name: Boot test

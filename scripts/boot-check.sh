@@ -33,8 +33,11 @@ chk "rootfs が残容量まで拡張 (>3GiB)" '[ "$(findmnt -bno SIZE /)" -gt 32
 chk "DHCP で IPv4 取得 (networkd)" \
 	'timeout 60 sh -c "until ip -4 addr show scope global | grep -q dynamic; do sleep 2; done"'
 chk "デフォルト経路がある" 'ip route | grep -q ^default'
-chk "DNS 解決 (resolved スタブ経由)" 'timeout 30 getent hosts deb.debian.org'
-chk "外部への HTTP 到達" 'curl -m 30 -fsI http://deb.debian.org'
+# 外部依存の検査は一時的な DNS/CDN 障害でリリースを落とさないようリトライする
+chk "DNS 解決 (resolved スタブ経由)" \
+	'timeout 60 sh -c "until getent hosts deb.debian.org; do sleep 3; done"'
+chk "外部への HTTP 到達" \
+	'curl -m 30 -fsI --retry 3 --retry-all-errors --retry-delay 5 http://deb.debian.org'
 
 # firewall4 相当の nft ruleset (limit/fib/quota/log/reject/hash/numgen/masq/redir/ct)
 cat > /tmp/fw4test.nft << 'NFT'
