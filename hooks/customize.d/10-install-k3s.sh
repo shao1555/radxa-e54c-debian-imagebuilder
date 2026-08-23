@@ -5,19 +5,20 @@
 set -euo pipefail
 ROOT="$1"
 
-# バージョンと SHA256 は必ずペアで更新する (renovate 等での自動更新を想定)。
+# バージョン・URL・SHA256 は dependencies.lock.yaml で一元管理する (Issue #4)。
+# 必ずペアで更新する (renovate 等での自動更新を想定)。
 # SHA256 は https://github.com/k3s-io/k3s/releases の sha256sum-arm64.txt に
-# 記載の k3s-arm64 の値。検証はスキップ不可: 未設定ならビルドを失敗させる
-K3S_VERSION="v1.36.3+k3s1"
-K3S_SHA256="c9a209103f480f163b7c6a56f00862b4481927b284dc29a3716bb70d886691a8"
+# 記載の k3s-arm64 の値。検証はスキップ不可: 取得できなければビルドを失敗させる
+TOP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+K3S_URL="$(python3 "$TOP/scripts/lock-get.py" k3s.url)"
+K3S_SHA256="$(python3 "$TOP/scripts/lock-get.py" k3s.sha256)"
 
-if [[ -z "$K3S_SHA256" || "$K3S_SHA256" == *PINNED* ]]; then
-	echo "エラー: K3S_SHA256 が未設定 (チェックサム検証はスキップできない)" >&2
+if [[ -z "$K3S_SHA256" ]]; then
+	echo "エラー: k3s.sha256 が lock に無い (チェックサム検証はスキップできない)" >&2
 	exit 1
 fi
 
-curl -fL "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s-arm64" \
-	-o "$ROOT/usr/local/bin/k3s"
+curl -fL "$K3S_URL" -o "$ROOT/usr/local/bin/k3s"
 echo "$K3S_SHA256  $ROOT/usr/local/bin/k3s" | sha256sum -c -
 chmod 0755 "$ROOT/usr/local/bin/k3s"
 for cmd in kubectl crictl ctr; do

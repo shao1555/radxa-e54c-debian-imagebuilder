@@ -35,13 +35,9 @@ RUN if [ "$(dpkg --print-architecture)" != "arm64" ]; then \
             crossbuild-essential-arm64 && rm -rf /var/lib/apt/lists/*; \
     fi
 
-# Radxa APT リポジトリの keyring (mmdebstrap は apt を chroot の外で実行するため、
-# signed-by のパスはこのコンテナ側の /usr/share/keyrings が参照される)
-RUN curl -fsL "https://radxa-repo.github.io/bookworm/files.list" -o /tmp/files.list \
-    && path="$(grep -m1 'radxa-archive-keyring_.*_all\.deb' /tmp/files.list | sed 's|^\./||')" \
-    && curl -fL "https://radxa-repo.github.io/bookworm/$path" -o /tmp/radxa-keyring.deb \
-    && dpkg -i /tmp/radxa-keyring.deb \
-    && rm -f /tmp/radxa-keyring.deb /tmp/files.list
+# (Radxa keyring の焼き込みは廃止: radxa の deb は dependencies.lock.yaml で
+#  固定した URL から取得・sha256 検証して dpkg 投入するため、ビルド時の apt が
+#  radxa リポジトリに触れることは無くなった)
 
 # kernel.base_config: debian 用の Debian カーネル config
 # (このコンテナのアーキテクチャ分の config が入る。E54C 用途では arm64 で使う)

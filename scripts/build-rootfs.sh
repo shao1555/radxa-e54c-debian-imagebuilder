@@ -67,31 +67,29 @@ echo "kernel deb preflight passed: $(basename "$img_deb")"
 
 python3 scripts/render-bdebstrap.py "$OUT"
 
-# Radxa の APT 鍵 (U-Boot deb の取得に必要) をホスト側 keyring から拾えるよう準備
-KEYRING_DIR="$OUT/keyrings"
-mkdir -p "$KEYRING_DIR"
-cp -a /usr/share/keyrings/. "$KEYRING_DIR/" 2>/dev/null || true
-if [[ ! -f "$KEYRING_DIR/radxa-archive-keyring.gpg" ]]; then
-	# files.list から keyring deb の現行パスを解決して取得する
-	# (curl | grep -m1 は SIGPIPE で curl が exit 23 になり pipefail に殺されるため、
-	#  一旦変数に受けてから grep する)
-	repo="$(python3 -c "import yaml;print(yaml.safe_load(open('config.yaml'))['uboot']['apt_repo'])")"
-	files_list="$(curl -fsL "$repo/files.list")"
-	path="$(grep -m1 'radxa-archive-keyring_.*_all\.deb' <<< "$files_list" | sed 's|^\./||')"
-	curl -fL "$repo/$path" -o /tmp/radxa-keyring.deb
-	# radxa-archive-keyring.gpg は年次 keyring への symlink なので、実体ごと全て展開する
-	tmpk="$(mktemp -d)"
-	dpkg-deb --fsys-tarfile /tmp/radxa-keyring.deb | tar -x -C "$tmpk" ./usr/share/keyrings
-	cp -a "$tmpk/usr/share/keyrings/." "$KEYRING_DIR/"
-	rm -rf "$tmpk"
-	[[ -s "$(readlink -f "$KEYRING_DIR/radxa-archive-keyring.gpg")" ]] || {
-		echo "radxa keyring の展開に失敗" >&2; exit 1; }
-fi
+# Radxa の deb (keyring / U-Boot) は apt 解決せず、dependencies.lock.yaml で
+# 固定した URL から取得して sha256 検証する (customize hook が dpkg で投入する)。
+# mmdebstrap は radxa リポジトリに一切触れないため、keyring の事前準備も不要
+RADXA_DEBS="$OUT/radxa-debs"
+mkdir -p "$RADXA_DEBS"
+while IFS=$'\t' read -r pkg ver url sha; do
+	deb="$RADXA_DEBS/$(basename "$url")"
+	if [[ ! -f $deb ]] || ! sha256sum -c --status <<< "$sha  $deb" 2> /dev/null; then
+		echo "downloading $pkg $ver ..."
+		curl -fL "$url" -o "$deb"
+	fi
+	sha256sum -c --status <<< "$sha  $deb" || {
+		echo "エラー: $pkg の sha256 が lock と一致しない (upstream の改変または消失)" >&2
+		echo "  url: $url" >&2
+		rm -f "$deb"
+		exit 1
+	}
+done < <(python3 scripts/lock-get.py radxa.debs)
+echo "radxa debs verified: $(ls "$RADXA_DEBS")"
 
 $SUDO bdebstrap -c "$OUT/bdebstrap.yaml" \
 	--name "$OUT/build" \
-	--force \
-	--keyring "$KEYRING_DIR"
+	--force
 
 $SUDO chown -R "$(id -u):$(id -g)" "$OUT/build"
 echo "rootfs: $OUT/build/rootfs.tar"

@@ -35,9 +35,23 @@ if [[ "$ver" == *-rc* ]]; then
 			https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git "$src"
 	fi
 else
-	major="${ver%%.*}"
+	# release 版は dependencies.lock.yaml の URL から取得し sha256 を検証する
+	# (キャッシュ済み tarball も毎回検証する。-rc 版の git clone は対象外)
+	lock_ver="$(python3 scripts/lock-get.py kernel.version)"
+	lock_url="$(python3 scripts/lock-get.py kernel.url)"
+	lock_sha="$(python3 scripts/lock-get.py kernel.sha256)"
+	if [[ "$lock_ver" != "$ver" ]]; then
+		echo "エラー: config.yaml (kernel.version=$ver) と dependencies.lock.yaml" >&2
+		echo "  (kernel.version=$lock_ver) が食い違っている。lock を更新すること" >&2
+		exit 1
+	fi
 	tar="$BUILD_BASE/src/linux-$ver.tar.xz"
-	[[ -f $tar ]] || curl -fL "https://cdn.kernel.org/pub/linux/kernel/v${major}.x/linux-$ver.tar.xz" -o "$tar"
+	[[ -f $tar ]] || curl -fL "$lock_url" -o "$tar"
+	sha256sum -c --status <<< "$lock_sha  $tar" || {
+		echo "エラー: linux-$ver.tar.xz の sha256 が lock と一致しない" >&2
+		rm -f "$tar"
+		exit 1
+	}
 	src="$BUILD_BASE/src/linux-$ver"
 	rm -rf "$src"
 	tar -C "$BUILD_BASE/src" -xf "$tar"

@@ -130,6 +130,11 @@ else
 fi
 check "/etc/kernel/cmdline"                '^-.* \./etc/kernel/cmdline$'
 check "U-Boot 書き込みスクリプト (実行可)" '^-rwx.* \./usr/lib/u-boot/radxa-e54c/setup\.sh$'
+# Radxa deb は lock 固定の dpkg 投入だが、配備後の U-Boot 更新経路
+# (リポジトリ設定 + keyring) は成果物に残っていること
+check "radxa リポジトリの sources.list"    '\./etc/apt/sources\.list\.d/80-radxa-uboot\.list$'
+check "radxa リポジトリの pin 設定"        '\./etc/apt/preferences\.d/radxa-uboot-only$'
+check "radxa keyring"                      '\./usr/share/keyrings/radxa-archive-keyring\.gpg'
 
 # --- コンテナ基盤 ---
 check "incus (実行可)"                     '^-rwx.* \./usr/bin/incus$'

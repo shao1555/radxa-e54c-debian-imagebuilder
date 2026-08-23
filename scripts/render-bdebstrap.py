@@ -29,19 +29,6 @@ setup_hooks = [
     f'> "$1/etc/apt/sources.list.d/50-{suite}-updates.list"',
     f'head -n1 "$1/etc/apt/sources.list" | sed -E -e "s/({suite})/\\1-security/" '
     f'-e "s|/debian |/debian-security |" > "$1/etc/apt/sources.list.d/50-{suite}-security.list"',
-    # Radxa リポジトリ (U-Boot 専用に pin する)。
-    # keyring パッケージ自体がこのリポジトリから入る鶏卵問題があるため、
-    # build-rootfs.sh が取得した keyring ファイルを先に target へ直接コピーし、
-    # 最初から signed-by で参照する (apt 3.0/sqv は target 内の鍵しか見ない)
-    'mkdir -p "$1/usr/share/keyrings"',
-    # canonical 名は年次 keyring への symlink のため、実体ごとまとめてコピーする
-    f'cp -a "{TOP}"/out/rootfs/keyrings/radxa-archive-keyring*.gpg "$1/usr/share/keyrings/"',
-    f'echo "deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] '
-    f'{ub["apt_repo"]} {ub["apt_suite"]} main" > "$1/etc/apt/sources.list.d/80-radxa-uboot.list"',
-    'mkdir -p "$1/etc/apt/preferences.d"',
-    'printf "Package: *\\nPin: origin radxa-repo.github.io\\nPin-Priority: -1\\n\\n'
-    'Package: u-boot-* radxa-archive-keyring\\nPin: origin radxa-repo.github.io\\n'
-    'Pin-Priority: 500\\n" > "$1/etc/apt/preferences.d/radxa-uboot-only"',
 ]
 
 customize_hooks = [
@@ -61,6 +48,25 @@ customize_hooks = [
     # headers も apt-get -f が削除して「成功」する可能性があるため実在を確認する
     'ls -d "$1"/usr/src/linux-headers-* > /dev/null 2>&1 || '
     '{ echo "エラー: linux-headers が rootfs にインストールされていない" >&2; exit 1; }',
+    # Radxa の deb (keyring / U-Boot)。apt 解決ではなく dependencies.lock.yaml で
+    # 固定した deb (build-rootfs.sh が取得・sha256 検証済み) を dpkg で投入する。
+    # dpkg -i は全 unpack 後にまとめて configure するため、メタパッケージと実体を
+    # 1 回で入れられる
+    f'mkdir -p "$1/tmp/radxa-debs" && cp "{TOP}"/out/rootfs/radxa-debs/*.deb "$1/tmp/radxa-debs/"',
+    'chroot "$1" sh -c "dpkg -i /tmp/radxa-debs/*.deb" && rm -rf "$1/tmp/radxa-debs"',
+    # U-Boot の書き込みスクリプト (build-image.sh が使う) と keyring の実在を確認
+    'test -x "$1/usr/lib/u-boot/radxa-e54c/setup.sh" || '
+    '{ echo "エラー: u-boot deb の投入に失敗 (setup.sh が無い)" >&2; exit 1; }',
+    'test -e "$1/usr/share/keyrings/radxa-archive-keyring.gpg" || '
+    '{ echo "エラー: radxa keyring の投入に失敗" >&2; exit 1; }',
+    # 配備後の U-Boot 更新経路として radxa リポジトリを設定しておく
+    # (ビルド時の apt はこのリポジトリに一切触れない。U-Boot 専用に pin する)
+    f'echo "deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] '
+    f'{ub["apt_repo"]} {ub["apt_suite"]} main" > "$1/etc/apt/sources.list.d/80-radxa-uboot.list"',
+    'mkdir -p "$1/etc/apt/preferences.d"',
+    'printf "Package: *\\nPin: origin radxa-repo.github.io\\nPin-Priority: -1\\n\\n'
+    'Package: u-boot-* radxa-archive-keyring\\nPin: origin radxa-repo.github.io\\n'
+    'Pin-Priority: 500\\n" > "$1/etc/apt/preferences.d/radxa-uboot-only"',
     # files/ overlay をそのまま重ねる
     f'if [ -d "{TOP}/files" ]; then cp -a "{TOP}/files/." "$1/"; fi',
     # hostname
@@ -120,8 +126,8 @@ config = {
             # 一切ログインできなくなる (QEMU ブートテストで検出)
             "init", "sudo", "login", "systemd-boot", "initramfs-tools", "zstd",
             "u-boot-menu",  # u-boot-update (extlinux.conf 生成)
-            "radxa-archive-keyring",
-            *ub["packages"],
+            # radxa の keyring / U-Boot は apt 解決しない (dependencies.lock.yaml
+            # で固定した deb を customize hook が dpkg で投入する)
             *packages,
         ],
         "setup-hooks": setup_hooks,
