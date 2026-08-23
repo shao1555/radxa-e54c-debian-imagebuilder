@@ -3,7 +3,7 @@
 # boot テスト bundle の dispatcher (QEMU ゲスト内で root として実行される)。
 # core / 各モジュールのテストを独立した subprocess で実行して結果を集約する
 # (同一シェルスコープへの連結だと変数・関数・exit・trap が衝突するため)。
-# bundle 構成: test-lib.sh / core.sh / modules/<id>/*.sh / run.sh (これ)
+# bundle 構成: test-lib.sh / core.sh / modules/<id>/* / run.sh (これ)
 dir="$(cd "$(dirname "$0")" && pwd)"
 export E54C_BOOT_TEST_LIB="$dir/test-lib.sh"
 total=0
