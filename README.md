@@ -89,6 +89,10 @@ CI は **devcontainer (arm64/amd64) / kernel / rootfs / image / boot-test / rele
 
 - **リリースイメージ**: ユーザー `debian` / パスワード `debian`(公開値)。
   **初回ログイン時にパスワード変更を強制される**(既知パスワードのままの運用を防ぐ)。
+  ユーザー名や変更強制の方針は [config.yaml](config.yaml) の
+  `moduleConfiguration.default-user`(`username` / `requirePasswordChange`)で
+  変更できる(契約は [docs/modules.md](docs/modules.md))。強制を無効化すると
+  既知パスワードのまま運用され得るため、教室等での明示的な選択に限ること。
   変更後は公開鍵運用への移行を推奨。公開値である以上、初回起動〜初回ログインの間は
   誰でもログインできるため、**初回セットアップは信頼できる隔離ネットワーク
   (直結ケーブル等)で行うこと**

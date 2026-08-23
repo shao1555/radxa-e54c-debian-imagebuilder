@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shao1555/radxa-e54c-debian-imagebuilder/schemas/build-request.schema.json",
+  "title": "BuildRequest (e54c.image/v1alpha1)",
+  "description": "Resolver への入力。現在は config.yaml adapter が機械的に生成する (将来は profile parser も同じ形式を生成する)。Resolver 入口で検証される",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target", "selection", "moduleConfiguration", "secretReferences"],
+  "properties": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["board", "architecture", "suite"],
+      "properties": {
+        "board": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "architecture": { "type": "string", "pattern": "^[a-z0-9]+$" },
+        "suite": { "type": "string", "pattern": "^[a-z]+$" }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "const": "all-builtin" }
+      }
+    },
+    "moduleConfiguration": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+      "additionalProperties": { "type": "object" }
+    },
+    "secretReferences": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+      "additionalProperties": {
+        "type": "object",
+        "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source"],
+          "properties": {
+            "source": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["type", "name"],
+              "properties": {
+                "type": { "const": "environment" },
+                "name": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

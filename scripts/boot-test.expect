@@ -1,15 +1,26 @@
 #!/usr/bin/expect -f
 # SPDX-License-Identifier: GPL-2.0-only
-# QEMU 上でイメージをブートし、シリアルコンソール経由でログイン
-# (debian/debian → 初回パスワード変更の強制も通す) して boot テスト bundle
-# (core + module tests + dispatcher の tar) を実行し、最後にホスト側から
-# 実際の SSH ログイン (hostfwd 経由) を検証する。
-# 引数: <イメージ (raw)> <boot テスト bundle (tar)> <SSH 転送ポート>
+# QEMU 上でイメージをブートし、シリアルコンソール経由で既定ユーザーとして
+# ログイン (requirePasswordChange が true なら初回パスワード変更の強制も通す)
+# して boot テスト bundle (core + module tests + dispatcher の tar) を実行し、
+# 最後にホスト側から実際の SSH ログイン (hostfwd 経由) を検証する。
+# username 等は plan の解決済み config から boot-test.sh が渡す
+# (hard-coded な debian を前提にしない)。初期パスワードは argv に載せず
+# (プロセス一覧から見えるため) 0600 の一時ファイルのパスで受け取る。
+# 引数: <イメージ (raw)> <bundle (tar)> <SSH 転送ポート>
+#       <ログインユーザー名> <初期パスワードのファイルパス> <requirePasswordChange (true|false)>
 
 set timeout 900
 set img [lindex $argv 0]
 set chk [lindex $argv 1]
 set sshport [lindex $argv 2]
+set login_user [lindex $argv 3]
+set pwfile [lindex $argv 4]
+set require_change [lindex $argv 5]
+set pf [open $pwfile r]
+fconfigure $pf -translation binary
+set initpass [read $pf]
+close $pf
 set newpass "BootTest-Passw0rd"
 
 spawn qemu-system-aarch64 \
@@ -21,7 +32,7 @@ spawn qemu-system-aarch64 \
     -nographic -no-reboot
 set qemu_id $spawn_id
 
-# --- ログイン (debian/debian) ---
+# --- ログイン (既定ユーザー) ---
 # カーネルメッセージがプロンプトに割り込むと入力が化けることがあるため、
 # Password prompt が出ずに login prompt に戻された場合は数回リトライする
 expect {
@@ -32,9 +43,9 @@ expect {
 set timeout 60
 set logged_in 0
 for {set try 0} {$try < 3} {incr try} {
-    send "debian\r"
+    send "$login_user\r"
     expect {
-        "Password:" { send "debian\r"; set logged_in 1; break }
+        "Password:" { send "$initpass\r"; set logged_in 1; break }
         -re "login: ?$" { continue }
         timeout {
             # プロンプトが埋もれた可能性。改行で getty を叩き直す
@@ -49,27 +60,33 @@ for {set try 0} {$try < 3} {incr try} {
 if {!$logged_in} { puts "\nBOOTTEST: NG - Password prompt が出ない"; exit 1 }
 set timeout 900
 
-# --- 初回ログインのパスワード変更強制 (chage -d 0 の検証を兼ねる) ---
-expect {
-    -re {[Cc]urrent password:} { send "debian\r" }
-    timeout { puts "\nBOOTTEST: NG - パスワード変更の強制が発動しない"; exit 1 }
+# --- 初回ログインのパスワード変更強制 (requirePasswordChange の検証) ---
+if {$require_change eq "true"} {
+    expect {
+        -re {[Cc]urrent password:} { send "$initpass\r" }
+        timeout { puts "\nBOOTTEST: NG - パスワード変更の強制が発動しない"; exit 1 }
+    }
+    expect {
+        -re {[Nn]ew password:} { send "$newpass\r" }
+        timeout { puts "\nBOOTTEST: NG - New password prompt が出ない"; exit 1 }
+    }
+    expect {
+        -re {[Rr]e(type|peat).*password:} { send "$newpass\r" }
+        timeout { puts "\nBOOTTEST: NG - Retype prompt が出ない"; exit 1 }
+    }
+    puts "\nBOOTTEST: 初回パスワード変更を通過"
+} else {
+    # requirePasswordChange: false → 変更対話なしでそのままシェルへ。
+    # 以後の対話は初期パスワードのまま行う
+    set newpass $initpass
 }
-expect {
-    -re {[Nn]ew password:} { send "$newpass\r" }
-    timeout { puts "\nBOOTTEST: NG - New password prompt が出ない"; exit 1 }
-}
-expect {
-    -re {[Rr]e(type|peat).*password:} { send "$newpass\r" }
-    timeout { puts "\nBOOTTEST: NG - Retype prompt が出ない"; exit 1 }
-}
-puts "\nBOOTTEST: 初回パスワード変更を通過"
 
 # パスワード変更後はセッションが切られて再ログインになる場合と、
 # そのままシェルに入る場合の両方がある
 expect {
     -re {\$ $} {}
     -re "login: ?$" {
-        send "debian\r"
+        send "$login_user\r"
         expect "Password:"
         send "$newpass\r"
         expect {
@@ -85,7 +102,7 @@ puts "\nBOOTTEST: ログイン成功"
 set timeout 120
 send "sudo -s\r"
 expect {
-    -re {[Pp]assword for debian:} { send "$newpass\r"; exp_continue }
+    -re {[Pp]assword for [a-z0-9_-]+:} { send "$newpass\r"; exp_continue }
     -re "# $" {}
     timeout { puts "\nBOOTTEST: NG - sudo で root になれない"; exit 1 }
 }
@@ -139,7 +156,7 @@ expect -ex "CHK_DONE"
 set timeout 120
 spawn ssh -p $sshport -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=30 -o NumberOfPasswordPrompts=1 -o PreferredAuthentications=password \
-    debian@127.0.0.1 echo SSH_LOGIN_OK
+    $login_user@127.0.0.1 echo SSH_LOGIN_OK
 set ssh_ok 0
 expect {
     -re {[Pp]assword:} { send "$newpass\r"; exp_continue }

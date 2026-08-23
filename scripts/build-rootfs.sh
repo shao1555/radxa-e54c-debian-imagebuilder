@@ -6,38 +6,40 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-TOP="$PWD"
-OUT="$TOP/out/rootfs"
-mkdir -p "$OUT"
+top="$PWD"
+out="$top/out/rootfs"
+mkdir -p "$out"
 
-# devcontainer 内は root で動くため sudo を無効化。非 root では sudo の
-# env_reset で DEFAULT_PASSWORD が落ちないよう明示的に保持する
-SUDO="sudo"
-[[ $EUID -eq 0 ]] && SUDO=""
+# devcontainer 内は root で動くため sudo を無効化
+sudo_cmd="sudo"
+[[ $EUID -eq 0 ]] && sudo_cmd=""
 
 # ローカルビルドの秘匿設定。make 経由の include だと $ や # を含むパスワードが
-# make の構文解釈で壊れるため、shell で source する (値はシングルクォート推奨)
-if [[ -f "$TOP/.env" ]]; then
+# make の構文解釈で壊れるため、shell で source する (値はシングルクォート推奨)。
+# secret の参照は実プロセス環境のみを見る (secrets-lib.sh) ため、export 付き
+# (set -a) で source する
+if [[ -f "$top/.env" ]]; then
+	set -a
 	# shellcheck source=/dev/null
-	source "$TOP/.env"
+	source "$top/.env"
+	set +a
 fi
 
-# (DEFAULT_PASSWORD の検証はモジュール解決後に行う: default-user モジュールが
-#  解決対象に含まれる場合だけ必須とする。将来モジュールを無効化しても
-#  framework が不要な secret を要求し続けないための境界)
+# (secret の必要性は plan の requiredSecrets が決める: module manifest の宣言と
+#  config.yaml の secretReferences から導出される。module を外せば要求されない)
 
 # カーネル deb と E54C の DTB の存在を事前検証する。無いまま進めると
 # 「正常に生成されたが起動不能な rootfs」ができてしまう。
 # 投入フックは linux-image-*.deb を全部コピーするため、検証対象と投入対象が
 # 一致するよう「非 dbg の image deb は正確に 1 個」を要求する
-mapfile -t img_debs < <(ls "$TOP"/out/debs/linux-image-*.deb 2> /dev/null | grep -v -- -dbg || true)
+mapfile -t img_debs < <(ls "$top"/out/debs/linux-image-*.deb 2> /dev/null | grep -v -- -dbg || true)
 if (( ${#img_debs[@]} != 1 )); then
 	echo "エラー: 非 dbg の linux-image deb は正確に 1 個であるべき (現在 ${#img_debs[@]} 個)。" >&2
 	echo "  'make kernel' を実行するか、out/debs/ の古い deb を掃除すること" >&2
 	exit 1
 fi
 img_deb="${img_debs[0]}"
-mapfile -t hdr_debs < <(ls "$TOP"/out/debs/linux-headers-*.deb 2> /dev/null || true)
+mapfile -t hdr_debs < <(ls "$top"/out/debs/linux-headers-*.deb 2> /dev/null || true)
 if (( ${#hdr_debs[@]} != 1 )); then
 	echo "エラー: linux-headers deb は正確に 1 個であるべき (現在 ${#hdr_debs[@]} 個)" >&2
 	exit 1
@@ -59,49 +61,29 @@ scripts/verify-build-env.sh
 # pipeline ごとに一度だけ生成する。ここでは再生成しない。
 # 入力の再検証は各 consumer が自プロセス内で行う (render-bdebstrap.py が
 # load_plan + verify を実行し、required-secrets 等の CLI も load 時に検証する)
-PLAN="$TOP/out/meta/module-plan.json"
+plan="$top/out/meta/module-plan.json"
 if [[ "${1:-}" == "--plan" ]]; then
-	PLAN="$2"
+	plan="$2"
 	shift 2
 fi
-[[ -f $PLAN ]] || { echo "エラー: module-plan が無い: $PLAN (make resolve)" >&2; exit 1; }
+[[ -f $plan ]] || { echo "エラー: module-plan が無い: $plan (make resolve)" >&2; exit 1; }
 
 # secret input の汎用処理 (plan の requiredSecrets を処理する。module ID の
-# 特別扱いはしない)。値は環境にグローバル export せず、0600 の一時ファイルに
-# 置いて consumer module の hook 起動時にだけ環境注入する (render が配線する)
-SECRETS_DIR="$(mktemp -d)"
-trap 'rm -rf "$SECRETS_DIR"' EXIT
-secret_env_vars=""
-required_secrets="$(python3 scripts/resolve-modules.py required-secrets --plan "$PLAN")"
-while IFS=$'\t' read -r name consumer source; do
-	[[ -n $name ]] || continue
-	[[ $source == environment ]] || { echo "エラー: 未対応の secret source: $source" >&2; exit 1; }
-	value="${!name:-}"
-	if [[ -z $value ]]; then
-		cat >&2 <<- EOF
-		エラー: $name が未設定です (module '$consumer' の必須 secret)。
-		  ローカルビルド: cp .env.example .env して $name を設定してください
-		  (CI は workflow が設定します)
-		EOF
-		exit 1
-	fi
-	# chpasswd 等は行区切りで解釈するため、CR/LF を含む値は事故のもとなので拒否する
-	if [[ $value == *$'\n'* || $value == *$'\r'* ]]; then
-		echo "エラー: $name に改行 (CR/LF) を含めることはできません" >&2
-		exit 1
-	fi
-	(umask 077 && printf '%s' "$value" > "$SECRETS_DIR/$name")
-	export "E54C_SECRET_FILE_${name}=$SECRETS_DIR/$name"
-	secret_env_vars="${secret_env_vars:+$secret_env_vars,}E54C_SECRET_FILE_${name}"
-	# 値そのものは必ず環境から外す (bdebstrap 配下の全 hook が継承するのを防ぐ)
-	unset "$name"
-done <<< "$required_secrets"
+# 特別扱いはしない)。materialize の規約と実装は scripts/secrets-lib.sh を参照
+# (framework は secret を opaque に扱い、衝突フリーなファイル名 =
+#  fileEnvironment に置いて参照元環境変数を一括 unset する)
+# shellcheck source=scripts/secrets-lib.sh
+source scripts/secrets-lib.sh
+secrets_dir="$(mktemp -d)"
+trap 'rm -rf "$secrets_dir"' EXIT
+required_secrets="$(python3 scripts/resolve-modules.py required-secrets --plan "$plan")"
+materialize_secrets "$secrets_dir" <<< "$required_secrets"
 # sudo 経由の場合、secret ファイルのパス変数だけを通す (値そのものは通らない)
 if [[ -n $secret_env_vars && $EUID -ne 0 ]]; then
-	SUDO="sudo --preserve-env=${secret_env_vars}"
+	sudo_cmd="sudo --preserve-env=${secret_env_vars}"
 fi
 
-python3 scripts/render-bdebstrap.py --plan "$PLAN" "$OUT"
+python3 scripts/render-bdebstrap.py --plan "$plan" "$out"
 
 # Radxa の deb (keyring / U-Boot) は apt 解決せず、dependencies.lock.yaml で
 # 固定した URL から取得して sha256 検証する (customize hook が dpkg で投入する)。
@@ -109,11 +91,11 @@ python3 scripts/render-bdebstrap.py --plan "$PLAN" "$OUT"
 # process substitution だと lock-get の失敗 (フィールド欠落等) が while に
 # 伝播しないため、先に変数へ受けて set -e で止まるようにする
 radxa_lock="$(python3 scripts/lock-get.py radxa.debs)"
-RADXA_DEBS="$OUT/radxa-debs"
-mkdir -p "$RADXA_DEBS"
+radxa_debs="$out/radxa-debs"
+mkdir -p "$radxa_debs"
 expected_debs=()
 while IFS=$'\t' read -r pkg ver url sha; do
-	deb="$RADXA_DEBS/$(basename "$url")"
+	deb="$radxa_debs/$(basename "$url")"
 	expected_debs+=("$(basename "$url")")
 	if [[ ! -f $deb ]] || ! sha256sum -c --status <<< "$sha  $deb" 2> /dev/null; then
 		echo "downloading $pkg $ver ..."
@@ -136,7 +118,7 @@ while IFS=$'\t' read -r pkg ver url sha; do
 done <<< "$radxa_lock"
 # lock に無いファイル (旧版など) が staging に残っていると customize hook の
 # dpkg -i *.deb に混入するため、掃除する
-for f in "$RADXA_DEBS"/*.deb; do
+for f in "$radxa_debs"/*.deb; do
 	[[ -e $f ]] || continue
 	name="$(basename "$f")"
 	if [[ ! " ${expected_debs[*]} " == *" $name "* ]]; then
@@ -146,18 +128,18 @@ for f in "$RADXA_DEBS"/*.deb; do
 done
 echo "radxa debs verified: ${expected_debs[*]}"
 
-$SUDO bdebstrap -c "$OUT/bdebstrap.yaml" \
-	--name "$OUT/build" \
+$sudo_cmd bdebstrap -c "$out/bdebstrap.yaml" \
+	--name "$out/build" \
 	--force
 
-$SUDO chown -R "$(id -u):$(id -g)" "$OUT/build"
+$sudo_cmd chown -R "$(id -u):$(id -g)" "$out/build"
 
 # rootfs artifact との整合性検証用 sidecar (module 入力の由来 + tar 実体の記録) と、
 # plan から導出する人間向け provenance (再解決ではなく純粋な format 変換)
-python3 scripts/resolve-modules.py write-sidecar --plan "$PLAN" \
-	--rootfs "$OUT/build/rootfs.tar" --output "$OUT/build/rootfs.meta.json"
-python3 scripts/resolve-modules.py export-resolved --plan "$PLAN" \
-	--output "$TOP/out/meta/resolved-modules.yaml"
+python3 scripts/resolve-modules.py write-sidecar --plan "$plan" \
+	--rootfs "$out/build/rootfs.tar" --output "$out/build/rootfs.meta.json"
+python3 scripts/resolve-modules.py export-resolved --plan "$plan" \
+	--output "$top/out/meta/resolved-modules.yaml"
 
-echo "rootfs: $OUT/build/rootfs.tar"
-echo "manifest: $OUT/build/manifest"
+echo "rootfs: $out/build/rootfs.tar"
+echo "manifest: $out/build/manifest"

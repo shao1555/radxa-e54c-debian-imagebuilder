@@ -10,7 +10,9 @@ total=0
 
 run_one() { # <ラベル> <スクリプト> <モジュール ID (core は空)>
 	out="$dir/.out.$$"
-	E54C_MODULE_ID="$3" "$2" > "$out" 2>&1
+	cfg=""
+	[ -n "$3" ] && [ -f "$dir/config/$3.json" ] && cfg="$dir/config/$3.json"
+	E54C_MODULE_ID="$3" E54C_MODULE_CONFIG="$cfg" "$2" > "$out" 2>&1
 	rc=$?
 	sed "s/^/$1 /" "$out"
 	rm -f "$out"

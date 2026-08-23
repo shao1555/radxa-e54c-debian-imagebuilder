@@ -62,7 +62,42 @@ tests:
     - tests/rootfs.sh
   boot:
     - tests/boot.sh
+
+configuration:                 # typed configuration (任意。Issue #20)
+  schema:                      # inline JSON Schema (Draft 2020-12)
+    type: object               # root は type: object 必須
+    additionalProperties: false  # 必須
+    required: [username]
+    properties:
+      username:
+        type: string
+        pattern: "^[a-z_][a-z0-9_-]{0,31}$"
+  defaults:                    # Resolver が適用する既定値 (schema で検証される)
+    username: debian
+
+secrets:                       # secret input の宣言 (任意)
+  initial-password:            # 論理 ID (^[a-z][a-z0-9-]{0,62}$)
+    required: true
+    description: 説明
 ```
+
+### configuration の規則
+
+- schema は **allowlist された keyword のみ**使える: type / properties /
+  required / additionalProperties / items / enum / const / pattern /
+  minLength / maxLength / minimum / maximum / minItems / maxItems /
+  uniqueItems / description / title。
+  `$ref` `$id` `$defs` `format` を含む allowlist 外の keyword は拒否される
+  (format は必要になった時点で検証動作とともに明示追加する)
+- 解決順序: `configuration.defaults` → BuildRequest
+  (config.yaml の `moduleConfiguration.<id>`) を **recursive merge**
+  (object は再帰、scalar / array は override が置換、null は schema が許す
+  ときだけ通常の値) → merge 結果を schema で検証 → `ModulePlan.modules[].config`
+- 未知の module ID への設定、未知の property、型・pattern 違反、
+  required 不足、defaults 自体の schema 違反はすべて fail-fast
+- 数値は JSON 互換 (有限) のみ。YAML の `.nan` / `.inf` は canonical JSON
+  (RFC 8259) に表現が無いため解決時に拒否される (plan の parse 境界でも拒否)
+- 解決済み config は artifact digest に含まれる (設定変更で rootfs が再構築される)
 
 ### スクリプト参照の制限
 
@@ -99,27 +134,47 @@ rootfs 生成の全体順序:
   モジュールは core の封印処理後に成果物を書き戻せない
 - hook には **rootfs のパス (tar 化前の展開済みディレクトリ) が第 1 引数**として
   渡され、builder 上 (chroot 外) で実行される。tar 化後の再展開は行われない
+- hook / test には `E54C_MODULE_ID` と `E54C_MODULE_CONFIG` (その module の
+  解決済み config だけを含む canonical JSON ファイルのパス) が渡される。
+  module は config.yaml / profile / ModulePlan 全体を直接読んではならない
 
-### secret input (限定契約)
+### secret input
 
-hook が参照できる環境変数は、契約に明記されたものだけである。
-偶然継承された環境変数はモジュール API ではなく、依存してはならない。
+secret は module manifest の `secrets:` で**宣言**し、参照元 (どの環境変数から
+値を取るか) は BuildRequest (config.yaml の `secretReferences`) が与える。
+module 固有の secret 定義は framework コードにハードコードされない。
 
-| 変数 | 渡し先 | 内容 |
-|---|---|---|
-| `DEFAULT_PASSWORD` | 組み込み `default-user` モジュールのみ | 既定ユーザーの初期パスワード |
-
-- `DEFAULT_PASSWORD` は `default-user` が解決対象に含まれる場合だけ
-  build-rootfs.sh が必須検証する (モジュールを外せば framework は要求しない)
-- 値は環境にグローバル export されない。builder が 0600 の一時ファイルに保持し、
-  consumer module の hook 起動時にだけ環境変数として注入する。
-  **注意**: 値そのものは他モジュールの hook 環境に現れないが、secret ファイル
-  パスの capability は同一ビルド内の全 hook が読める。MVP では組み込み
-  モジュールを単一の trust domain として許容しており、外部モジュール対応前に
-  per-hook の隔離 (sanitized environment / read-only staging / sandbox) を設計する
-- 値をログ、生成 YAML (bdebstrap.yaml)、`resolved-modules.yaml` に出力しない
-- 外部モジュール導入時には、モジュールごとの入力宣言と環境の sanitize を
-  別途設計する (それまで新しい環境変数契約は追加しない)
+- 必須 secret に参照が無い、宣言の無い secret への参照、未選択 module への
+  参照はすべて fail-fast
+- plan には**参照情報のみ** (`requiredSecrets`) が記録され、値は resolve 時に
+  読み取りすらしない。値・値の単純 hash を plan / ログ / 生成 YAML /
+  cache key に含めない
+- builder は値を 0600 の一時ファイル (ファイル名 = `fileEnvironment` 名。
+  module namespace 込みで衝突しない) に置き、そのパスを `fileEnvironment`
+  変数で hook から読めるようにする。全secretをmaterializeしてから参照元の
+  環境変数を一括でunsetするため、複数secretが同じsourceを共有できる。
+  materialize後に起動するbdebstrapおよびmodule hookにはraw値を継承しない。
+- framework は secret を **opaque なバイト列**として扱い、「参照元が未設定」
+  以外の検証はしない。形式検証 (空・改行の拒否など) は用途を知る consumer の
+  hook が行う (例: default-user は chpasswd の行区切り仕様のため空と CR/LF を
+  拒否する)
+- `fileEnvironment` 名は framework が module ID / secret ID から決定的に生成する
+  (長さプレフィクスで境界を一意化。例: `default-user` / `initial-password` →
+  `E54C_SECRET_FILE_M12_DEFAULT_USER_S16_INITIAL_PASSWORD`)。
+  生成名の全体重複も検査される
+- `E54C_SECRET_FILE_*` は fileEnvironment の**予約名前空間**であり、source の
+  環境変数名がここと交差する参照は拒否される (resolve 時・plan load 時・
+  builder の materialize 時の三重で検査する。交差を許すと export / unset が
+  secret 値とファイルパスを混線させ得る)
+- source の参照は builder プロセスの**実環境変数のみ** (printenv) を見る。
+  スクリプトの shell 内部変数は source にならず、framework の内部状態と
+  source 名前空間が交差しない (builder スクリプトの内部変数は小文字に統一)。
+  bash の readonly 変数 (`EUID` 等) は unset できないため source として拒否
+  される。`.env` は export 付き (`set -a`) で source される
+- **注意**: secret ファイルパスの capability は同一ビルド内の全 hook が読める。
+  MVP では組み込みモジュールを単一の trust domain として許容しており、
+  外部モジュール対応前に per-hook の隔離 (sanitized environment /
+  read-only staging / sandbox) を設計する
 
 | phase | 実行場所 | MVP |
 |---|---|---|
@@ -189,11 +244,28 @@ build / test / Release の全 consumer はこの plan だけを参照する
 
 - plan は workspace 相対 path と content digest (sha256) を持ち、
   absolute path / timestamp / secret 値を含まない (byte-identical に再生成できる)
-- consumer は plan を**自プロセス内で** load (schema・digest 再検算・root /
-  requiredSecrets 検証) し、利用する path の module-root containment / type /
-  mode / digest を利用直前に再検証する
-  (「Resolver が生成した plan だから安全」とは仮定しない)。
-  不一致は `module plan is stale` として拒否され、`make resolve` で再生成する
+- plan は「**任意の BuildRequest** から Resolver が生成した権威ある解決結果」
+  である。consumer は現在の `config.yaml` (BuildRequest) と値を照合**しない**
+  (照合すると profile など別 BuildRequest 由来の plan を拒否してしまう)。
+  consumer の検査は BuildRequest に依存しないものに限る:
+  - load 時: schema・3 digest の再検算、root = `modules/<id>` 固定と実体検証、
+    requiredSecrets の内部不変条件 (consumer が plan 内 module であること、
+    `fileEnvironment` が符号化規則と一致すること、重複が無いこと)
+  - 宣言整合 (verify_declarations): manifest を canonical path
+    (`modules/<id>/module.yaml`) 固定で sha・構造・identity まで検証したうえで、
+    plan 内 config が manifest の宣言 schema に適合すること、requiredSecrets の
+    各 entry が consumer の manifest で宣言済みであること、manifest が
+    `required: true` と宣言する secret が plan に存在することを検査する。
+    config / requiredSecrets を消費する CLI verb (required-secrets /
+    login-config / module-config / write-configs / list-tests) は、出力とその先の
+    副作用 (secret の読み出し等) より**前**にこの検査を行う
+  - verify-inputs (hooks phase): 宣言整合に加えて、利用する path の
+    module-root containment / type / mode / digest を利用直前に再検証する
+    (「Resolver が生成した plan だから安全」とは仮定しない)。
+    不一致は `module plan is stale` として拒否され、`make resolve` で再生成する
+- plan が workspace の**現在の入力**と一致するかの stale 検査は producer 側の
+  明示的な verb `verify-request` (フル再解決して `digests.plan` を比較) が担う。
+  plan には生成元の `buildRequestDigest` が記録され、由来の監査に使える
 - **plan の真正性の範囲**: 自己 digest は破損・不整合な変更を検出するが、
   digest ごと再計算できる作成者に対する「署名」ではない。ModulePlan は
   CI artifact など信頼できる経路で受け渡される権威ある解決結果として扱い、

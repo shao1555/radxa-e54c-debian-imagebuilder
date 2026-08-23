@@ -4,7 +4,7 @@ kind: Module
 
 metadata:
   id: default-user
-  description: 既定ログインアカウント (debian) と初期アクセス方針
+  description: 既定ログインアカウントと初期アクセス方針
 
 packages:
   apt:
@@ -14,10 +14,34 @@ packages:
     - login
     - sudo
 
+configuration:
+  schema:
+    type: object
+    additionalProperties: false
+    required:
+      - username
+      - requirePasswordChange
+    properties:
+      username:
+        type: string
+        pattern: "^[a-z_][a-z0-9_-]{0,31}$"
+        description: 既定ユーザー名
+      requirePasswordChange:
+        type: boolean
+        description: >
+          初回ログイン時のパスワード変更強制 (chage -d 0)。false は既知の
+          初期パスワードのまま運用され得るため安全性が下がる。教室など
+          授業中の強制変更を避けたい環境でのみ明示的に選択すること
+  defaults:
+    username: debian
+    requirePasswordChange: true
+
+secrets:
+  initial-password:
+    required: true
+    description: 既定ユーザーへ設定する初期パスワード
+
 hooks:
-  # DEFAULT_PASSWORD はこのモジュールへ渡される明示的な secret input
-  # (docs/modules.md 参照。default-user が解決対象のときだけ build-rootfs.sh が
-  #  必須検証する)
   rootfs.customize:
     - hooks/create-user.sh
 

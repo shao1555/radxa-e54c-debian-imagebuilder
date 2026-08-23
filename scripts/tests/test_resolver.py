@@ -293,19 +293,126 @@ class ResolverTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("source.root が不正", r.stderr)
 
-    def test_required_secrets_tamper_rejected(self):
-        # 注入先 (consumer) の付け替えを拒否 (secret isolation の維持)
+    def test_required_secrets_consumer_tamper_rejected(self):
+        # 注入先 (consumer) を secret を宣言していない module へ付け替える改ざん。
+        # 権威モデルでは load_plan は plan 内部不変条件のみ検査するため、符号化の
+        # 辻褄を合わせた entry は load を通るが、verify-inputs の BuildRequest
+        # 非依存検査 (consumer の manifest 宣言との整合) で拒否される
         _, path = self.plan()
 
         def mutate(plan):
-            plan["requiredSecrets"] = [
-                {"name": "DEFAULT_PASSWORD", "consumer": "beta", "source": "environment"}
-            ]
+            plan["requiredSecrets"] = [{
+                "id": "api-token", "consumer": "beta",
+                "source": {"type": "environment", "name": "X_TOKEN"},
+                "fileEnvironment":
+                    resolver_mod.secret_file_environment("beta", "api-token"),
+            }]
 
         self.tamper(path, mutate)
+        r = self.verify(path, "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("宣言していない secret", r.stderr)
+
+    def test_required_secrets_file_env_tamper_rejected(self):
+        # fileEnvironment の符号化改ざん (別 module の名前空間を指す) は
+        # load_plan の内部不変条件で拒否される
+        _, path = self.plan()
+
+        def mutate(plan):
+            plan["requiredSecrets"] = [{
+                "id": "api-token", "consumer": "beta",
+                "source": {"type": "environment", "name": "X_TOKEN"},
+                "fileEnvironment":
+                    resolver_mod.secret_file_environment("alpha", "api-token"),
+            }]
+
+        self.tamper(path, mutate)
+        r = self.verify(path, "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("符号化規則", r.stderr)
+
+    def test_required_secrets_unknown_consumer_rejected(self):
+        _, path = self.plan()
+
+        def mutate(plan):
+            plan["requiredSecrets"] = [{
+                "id": "api-token", "consumer": "ghost",
+                "source": {"type": "environment", "name": "X_TOKEN"},
+                "fileEnvironment":
+                    resolver_mod.secret_file_environment("ghost", "api-token"),
+            }]
+
+        self.tamper(path, mutate)
+        r = self.verify(path, "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("consumer が plan に無い", r.stderr)
+
+    def test_plan_with_nonfinite_number_rejected(self):
+        # json.loads は既定で非標準の NaN / Infinity を受理するため、
+        # plan の parse 境界で明示的に拒否する
+        _, path = self.plan()
+        plan = json.loads(path.read_text())
+        plan["modules"][0]["packages"]["apt"] = [float("nan")]
+        path.write_text(json.dumps(plan, sort_keys=True, indent=2))
         r = self.verify(path)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("requiredSecrets", r.stderr)
+        self.assertIn("JSON 互換でない数値", r.stderr)
+
+    def test_required_secrets_verb_rejects_undeclared(self):
+        # secret 値を読む consumer (build-rootfs.sh) が使う required-secrets verb
+        # 自体が、materialize (副作用) より前に宣言整合で拒否すること
+        _, path = self.plan()
+
+        def mutate(plan):
+            plan["requiredSecrets"] = [{
+                "id": "api-token", "consumer": "beta",
+                "source": {"type": "environment", "name": "X_TOKEN"},
+                "fileEnvironment":
+                    resolver_mod.secret_file_environment("beta", "api-token"),
+            }]
+
+        self.tamper(path, mutate)
+        r = run(self.ws, "required-secrets", "--plan", str(path))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("宣言していない secret", r.stderr)
+        self.assertEqual(r.stdout, "")  # 拒否前に 1 行も出力しない
+
+    def test_manifest_path_tamper_rejected(self):
+        # 宣言整合の根拠となる manifest は canonical path 固定
+        # (plan が指す任意の YAML を宣言の根拠にしない)
+        _, path = self.plan()
+
+        def mutate(plan):
+            alpha = next(m for m in plan["modules"] if m["id"] == "alpha")
+            alpha["manifest"]["path"] = "modules/alpha/hooks/setup.sh"
+
+        self.tamper(path, mutate)
+        r = self.verify(path, "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("canonical", r.stderr)
+
+    def test_verify_request_checks_existing_plan(self):
+        # 既存 plan の本体だけ変更して digest 欄を残した場合、
+        # 「一致」と誤報告せず load_plan の digest 再検算で拒否する
+        _, path = self.plan()
+        plan = json.loads(path.read_text())
+        plan["modules"][0]["packages"]["apt"] = ["evil"]
+        path.write_text(json.dumps(plan, sort_keys=True, indent=2,
+                                   ensure_ascii=False))
+        r = run(self.ws, "verify-request")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("一致しない", r.stderr)
+
+    def test_verify_request_stale_detection(self):
+        # producer 側の明示的 stale 検査 (consumer の load_plan は行わない):
+        # workspace の入力を変えると verify-request が不一致を報告する
+        self.plan()
+        r = run(self.ws, "verify-request")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (self.ws / "modules/alpha/hooks/setup.sh").write_text("#!/bin/sh\nexit 9\n")
+        r = run(self.ws, "verify-request")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("make resolve", r.stderr)
 
     def test_modules_dir_symlink_rejected(self):
         # modules/ 自体を workspace 外への symlink に置換 → resolve も load も拒否
@@ -421,6 +528,380 @@ class ResolverTest(unittest.TestCase):
                 "--rootfs", str(tar), "--sidecar", str(sidecar))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("再構築", r.stderr)
+
+
+def add_configured_module(ws, *, defaults=None, schema_extra=None, secret=True):
+    """configuration + secrets を宣言する module (gamma) を fixture に追加する"""
+    d = ws / "modules" / "gamma"
+    (d / "hooks").mkdir(parents=True)
+    h = d / "hooks/setup.sh"
+    h.write_text("#!/bin/sh\nexit 0\n")
+    h.chmod(0o755)
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["name", "nested"],
+        "properties": {
+            "name": {"type": "string", "pattern": "^[a-z]+$"},
+            "nested": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "a": {"type": "integer"},
+                    "b": {"type": "integer"},
+                },
+            },
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    if schema_extra:
+        schema["properties"].update(schema_extra)
+    spec = {
+        "apiVersion": "e54c.image/v1alpha1",
+        "kind": "Module",
+        "metadata": {"id": "gamma"},
+        "configuration": {
+            "schema": schema,
+            "defaults": defaults
+            if defaults is not None
+            else {"name": "abc", "nested": {"a": 1, "b": 2}, "tags": ["x", "y"]},
+        },
+        "hooks": {"rootfs.customize": ["hooks/setup.sh"]},
+    }
+    if secret:
+        spec["secrets"] = {"api-token": {"required": True, "description": "テスト"}}
+    import yaml as _yaml
+
+    (d / "module.yaml").write_text(_yaml.safe_dump(spec, allow_unicode=True))
+    return d
+
+
+def set_config_yaml(ws, module_config=None, secret_refs=None):
+    lines = [
+        "target:",
+        "  board: radxa-e54c",
+        "  architecture: arm64",
+        "debian:",
+        "  suite: trixie",
+    ]
+    import yaml as _yaml
+
+    text = "\n".join(lines) + "\n"
+    if module_config is not None:
+        text += _yaml.safe_dump({"moduleConfiguration": module_config},
+                                allow_unicode=True)
+    if secret_refs is not None:
+        text += _yaml.safe_dump({"secretReferences": secret_refs}, allow_unicode=True)
+    (ws / "config.yaml").write_text(text)
+
+
+GAMMA_REF = {"gamma": {"api-token": {"source": {"type": "environment",
+                                                "name": "GAMMA_TOKEN"}}}}
+
+
+class ConfigurationTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.ws = make_workspace(self.tmp)
+        add_configured_module(self.ws)
+        set_config_yaml(self.ws, secret_refs=GAMMA_REF)
+
+    def plan(self):
+        r, path = resolve(self.ws)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(path.read_text()), path
+
+    def gamma(self, plan):
+        return next(m for m in plan["modules"] if m["id"] == "gamma")
+
+    def test_defaults_only(self):
+        plan, _ = self.plan()
+        self.assertEqual(self.gamma(plan)["config"],
+                         {"name": "abc", "nested": {"a": 1, "b": 2},
+                          "tags": ["x", "y"]})
+
+    def test_override_merge_and_replace(self):
+        # object は再帰 merge (nested.a 保持)、scalar / array は置換
+        set_config_yaml(self.ws,
+                        module_config={"gamma": {"name": "xyz",
+                                                 "nested": {"b": 9},
+                                                 "tags": ["z"]}},
+                        secret_refs=GAMMA_REF)
+        plan, _ = self.plan()
+        self.assertEqual(self.gamma(plan)["config"],
+                         {"name": "xyz", "nested": {"a": 1, "b": 9}, "tags": ["z"]})
+
+    def assert_fail(self, needle):
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(needle, r.stderr)
+
+    def test_unknown_module_in_configuration(self):
+        set_config_yaml(self.ws, module_config={"nonexistent": {"x": 1}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("選択されていない")
+
+    def test_unknown_property_rejected(self):
+        set_config_yaml(self.ws, module_config={"gamma": {"bogus": 1}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("schema 違反")
+
+    def test_type_violation_rejected(self):
+        set_config_yaml(self.ws, module_config={"gamma": {"name": 5}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("schema 違反")
+
+    def test_pattern_violation_rejected(self):
+        set_config_yaml(self.ws, module_config={"gamma": {"name": "ABC"}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("schema 違反")
+
+    def test_required_missing_rejected(self):
+        # defaults から required の name を落とす → default も override も無い
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(self.ws, defaults={"nested": {"a": 1, "b": 2}})
+        self.assert_fail("schema 違反")
+
+    def test_defaults_schema_violation_rejected(self):
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(
+            self.ws, defaults={"name": "ABC", "nested": {"a": 1, "b": 2}})
+        self.assert_fail("schema 違反")
+
+    def test_config_change_updates_artifact_not_tests(self):
+        plan1, _ = self.plan()
+        set_config_yaml(self.ws, module_config={"gamma": {"name": "xyz"}},
+                        secret_refs=GAMMA_REF)
+        plan2, _ = self.plan()
+        self.assertNotEqual(plan1["digests"]["artifact"], plan2["digests"]["artifact"])
+        self.assertNotEqual(plan1["digests"]["plan"], plan2["digests"]["plan"])
+        self.assertEqual(plan1["digests"]["tests"], plan2["digests"]["tests"])
+
+    def test_configuration_for_module_without_declaration(self):
+        set_config_yaml(self.ws, module_config={"alpha": {"x": 1}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("configuration を宣言していない")
+
+    def test_inline_schema_ref_rejected(self):
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(self.ws, schema_extra={"evil": {"$ref": "#/x"}})
+        self.assert_fail("未対応の schema keyword")
+
+    def test_inline_schema_format_rejected(self):
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(self.ws, schema_extra={"mail": {"format": "email"}})
+        self.assert_fail("未対応の schema keyword")
+
+    def test_property_named_like_keyword_allowed(self):
+        # properties 配下の property 名 "pattern" は keyword ではない
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(self.ws, schema_extra={"pattern": {"type": "string"}})
+        r, _ = resolve(self.ws)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_nested_required_satisfied_by_override(self):
+        # defaults は deep.k を満たさない (defaults 検証は required を再帰的に
+        # 除いた schema で行うため通る) が、最終 config の検証は required を
+        # 強制するので override 無しでは拒否され、override で満たせば通る
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(
+            self.ws,
+            defaults={"name": "abc", "nested": {"a": 1}, "deep": {}},
+            schema_extra={"deep": {"type": "object", "additionalProperties": False,
+                                   "required": ["k"],
+                                   "properties": {"k": {"type": "integer"}}}})
+        self.assert_fail("schema 違反")
+        set_config_yaml(self.ws, module_config={"gamma": {"deep": {"k": 5}}},
+                        secret_refs=GAMMA_REF)
+        plan, _ = self.plan()
+        self.assertEqual(self.gamma(plan)["config"]["deep"], {"k": 5})
+
+    def test_nonfinite_override_rejected(self):
+        # PyYAML は .nan / .inf を float として読み、jsonschema は number として
+        # 通すが、canonical JSON (RFC 8259) に表現が無いため解決時に拒否する
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(self.ws, schema_extra={"ratio": {"type": "number"}})
+        set_config_yaml(self.ws, module_config={"gamma": {"ratio": float("nan")}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("JSON 互換でない数値")
+
+    def test_nonfinite_defaults_rejected(self):
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(
+            self.ws,
+            defaults={"name": "abc", "nested": {"a": 1}, "ratio": float("inf")},
+            schema_extra={"ratio": {"type": "number"}})
+        self.assert_fail("JSON 互換でない数値")
+
+    def tamper_config(self, path, name_value):
+        plan = json.loads(path.read_text())
+        g = next(m for m in plan["modules"] if m["id"] == "gamma")
+        g["config"]["name"] = name_value
+        resolver_mod.compute_digests(plan)
+        path.write_text(json.dumps(plan, sort_keys=True, indent=2,
+                                   ensure_ascii=False))
+
+    def test_authoritative_config_value_not_rechecked(self):
+        # 権威モデルの文書化テスト: plan の config 値が現在の config.yaml から
+        # 導出される値と違っても、宣言 schema に適合する限り consumer は受理する
+        # (profile 由来など、別 BuildRequest から生成した plan を拒否しないため。
+        # workspace との stale 検査は producer 側の verify-request が担う)
+        _, path = self.plan()
+        self.tamper_config(path, "zzz")
+        r = run(self.ws, "verify-inputs", "--plan", str(path), "--phase", "all")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_config_schema_violation_in_plan_rejected(self):
+        # plan 内 config が宣言 schema に違反する改ざんは verify-inputs で拒否
+        # (digest の辻褄を合わせても manifest の宣言 schema との適合で落ちる)
+        _, path = self.plan()
+        self.tamper_config(path, "ABC")  # pattern ^[a-z]+$ 違反
+        r = run(self.ws, "verify-inputs", "--plan", str(path), "--phase", "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("plan 内 config", r.stderr)
+
+
+class SecretReferenceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.ws = make_workspace(self.tmp)
+        add_configured_module(self.ws)
+        set_config_yaml(self.ws, secret_refs=GAMMA_REF)
+
+    def plan(self):
+        r, path = resolve(self.ws)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(path.read_text()), path
+
+    def test_required_secrets_derived(self):
+        plan, path = self.plan()
+        self.assertEqual(plan["requiredSecrets"], [{
+            "id": "api-token", "consumer": "gamma",
+            "source": {"type": "environment", "name": "GAMMA_TOKEN"},
+            "fileEnvironment": "E54C_SECRET_FILE_M5_GAMMA_S9_API_TOKEN",
+        }])
+        # secret 値 (環境変数の中身) が plan に現れない
+        self.assertNotIn("secret-value", path.read_text())
+
+    def test_resolve_does_not_read_secret_value(self):
+        # GAMMA_TOKEN が未設定でも resolve は成功する (値は resolve 時に読まない)
+        env = dict(os.environ)
+        env.pop("GAMMA_TOKEN", None)
+        r = subprocess.run(
+            [sys.executable, str(RESOLVER), "--workspace", str(self.ws),
+             "resolve", "--output", str(self.ws / "out/meta/module-plan.json")],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_missing_required_reference_rejected(self):
+        set_config_yaml(self.ws)  # secretReferences 無し
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("必須 secret", r.stderr)
+
+    def test_undeclared_reference_rejected(self):
+        set_config_yaml(self.ws, secret_refs={
+            **GAMMA_REF,
+            "alpha": {"nope": {"source": {"type": "environment", "name": "X"}}}})
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("宣言していない secret", r.stderr)
+
+    def test_reference_to_unknown_module_rejected(self):
+        set_config_yaml(self.ws, secret_refs={
+            **GAMMA_REF,
+            "ghost": {"tok": {"source": {"type": "environment", "name": "X"}}}})
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("選択されていない", r.stderr)
+
+    def test_secret_reference_change_updates_artifact(self):
+        plan1, _ = self.plan()
+        set_config_yaml(self.ws, secret_refs={
+            "gamma": {"api-token": {"source": {"type": "environment",
+                                               "name": "OTHER_VAR"}}}})
+        plan2, _ = self.plan()
+        self.assertNotEqual(plan1["digests"]["artifact"], plan2["digests"]["artifact"])
+
+    def test_reserved_source_name_rejected(self):
+        # source 環境変数名は fileEnvironment の予約名前空間と交差できない
+        # (交差すると builder の export / unset が secret 値とパスを混線させる)
+        set_config_yaml(self.ws, secret_refs={
+            "gamma": {"api-token": {"source": {"type": "environment",
+                                               "name": "E54C_SECRET_FILE_FOO"}}}})
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("予約名前空間", r.stderr)
+
+    def test_required_secret_missing_from_plan_rejected(self):
+        # manifest が required: true と宣言する secret を plan から落とす改ざん
+        # (注入の黙殺) は宣言整合の逆方向検査で拒否される
+        _, path = self.plan()
+        plan = json.loads(path.read_text())
+        plan["requiredSecrets"] = []
+        resolver_mod.compute_digests(plan)
+        path.write_text(json.dumps(plan, sort_keys=True, indent=2,
+                                   ensure_ascii=False))
+        r = run(self.ws, "verify-inputs", "--plan", str(path), "--phase", "hooks")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("必須 secret", r.stderr)
+        r = run(self.ws, "required-secrets", "--plan", str(path))
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_env_name_encoding_no_ambiguity(self):
+        # a-b/c と a/b-c は長さプレフィクスで別名になる
+        self.assertNotEqual(
+            resolver_mod.secret_file_environment("a-b", "c"),
+            resolver_mod.secret_file_environment("a", "b-c"))
+
+    def test_login_config_plumbing(self):
+        # boot harness の配線の軽量検証 (QEMU 無し): login-config verb が
+        # plan の解決済み username / requirePasswordChange / 初期パスワードの
+        # source 環境変数名を返す (harness は hard-coded debian に依存しない)
+        d = self.ws / "modules" / "default-user"
+        (d / "hooks").mkdir(parents=True)
+        import yaml as _yaml
+        spec = {
+            "apiVersion": "e54c.image/v1alpha1", "kind": "Module",
+            "metadata": {"id": "default-user"},
+            "configuration": {
+                "schema": {"type": "object", "additionalProperties": False,
+                           "required": ["username", "requirePasswordChange"],
+                           "properties": {
+                               "username": {"type": "string"},
+                               "requirePasswordChange": {"type": "boolean"}}},
+                "defaults": {"username": "debian", "requirePasswordChange": True},
+            },
+            "secrets": {"initial-password": {"required": True}},
+        }
+        (d / "module.yaml").write_text(_yaml.safe_dump(spec))
+        set_config_yaml(
+            self.ws,
+            module_config={"default-user": {"username": "student",
+                                            "requirePasswordChange": False}},
+            secret_refs={**GAMMA_REF,
+                         "default-user": {"initial-password": {
+                             "source": {"type": "environment",
+                                        "name": "MY_PASS"}}}})
+        _, path = self.plan()
+        r = run(self.ws, "login-config", "--plan", str(path))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "student\tfalse\tMY_PASS")
+        # module-config 経由の consumer (smoke test 等) も同じ値を見る
+        r = run(self.ws, "module-config", "--plan", str(path),
+                "--module", "default-user")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["username"], "student")
+
+    def test_login_config_requires_access_provider(self):
+        # default-user が plan に無い構成ではログイン手段を仮定できないため、
+        # login harness は黙って走らず明示的に失敗する
+        _, path = self.plan()
+        r = run(self.ws, "login-config", "--plan", str(path))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("access provider", r.stderr)
 
 
 if __name__ == "__main__":

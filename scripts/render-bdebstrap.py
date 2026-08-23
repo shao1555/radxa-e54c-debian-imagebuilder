@@ -19,6 +19,8 @@ module rootfs.customize は boot finalize より前 (initramfs / extlinux に影
 (モジュールが core の封印処理後に成果物を書き戻せない順序にするため)。
 """
 import argparse
+import json
+import shlex
 import sys
 import yaml
 from pathlib import Path
@@ -54,11 +56,16 @@ for m in modules:
         phase: [str(TOP / ref["path"]) for ref in refs]
         for phase, refs in m["hooks"].items()
     }
-# requiredSecrets: consumer module の hook 起動行にだけ secret を環境注入する
-# (docs/modules.md の限定契約。値は $E54C_SECRET_FILE_<NAME> のファイルから読む)
-secrets_by_consumer = {}
-for s in plan["requiredSecrets"]:
-    secrets_by_consumer.setdefault(s["consumer"], []).append(s["name"])
+# 解決済み module config を canonical JSON として materialize し、
+# 各 hook に E54C_MODULE_ID / E54C_MODULE_CONFIG で渡す (module は plan 全体や
+# config.yaml を読まない)。secret は値の環境注入を廃止し、hook 自身が
+# fileEnvironment (build-rootfs.sh が export するファイルパス変数) を読む
+config_dir = out_dir / "module-config"
+config_dir.mkdir(parents=True, exist_ok=True)
+for m in modules:
+    (config_dir / f"{m['id']}.json").write_text(
+        json.dumps(m["config"], sort_keys=True, separators=(",", ":"),
+                   ensure_ascii=False) + "\n")
 
 packages = []
 for line in (TOP / "packages.txt").read_text().splitlines():
@@ -89,16 +96,18 @@ live_sec = live_main.rsplit("/", 1)[0] + "/debian-security"
 
 def module_hook_cmd(m, h):
     """module hook の起動行を生成する。
-    secret input は plan の requiredSecrets に従い、consumer module の hook に
-    だけ環境注入する (module ID の特別扱いはしない)。値は環境にグローバル
-    export されず、build-rootfs.sh が用意する 0600 の一時ファイル (パスのみ
-    $E54C_SECRET_FILE_<NAME> で伝わる) から hook 起動時に読む。
-    生成 YAML に値もパスも埋め込まれない"""
-    prefix = "".join(
-        f'{name}="$(cat "$E54C_SECRET_FILE_{name}")" '
-        for name in secrets_by_consumer.get(m["id"], [])
+    E54C_MODULE_ID とその module の解決済み config (canonical JSON ファイルの
+    パス) だけを渡す。secret の値は環境に一切現れない: hook は自 module の
+    fileEnvironment 変数 (build-rootfs.sh が 0600 の一時ファイルパスを export)
+    からファイルを読む。生成 YAML に値もパスも埋め込まれない。
+    パスは shell に埋め込まれるため shlex.quote で符号化する
+    (workspace のパスに空白や記号が含まれても行が壊れない)"""
+    cfg_path = str(config_dir / f"{m['id']}.json")
+    return (
+        f'E54C_MODULE_ID={shlex.quote(m["id"])} '
+        f'E54C_MODULE_CONFIG={shlex.quote(cfg_path)} '
+        f'{shlex.quote(h)} "$1"'
     )
-    return f'{prefix}"{h}" "$1"'
 
 
 customize_hooks = [
