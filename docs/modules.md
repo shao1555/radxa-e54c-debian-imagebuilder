@@ -111,6 +111,9 @@ hook が参照できる環境変数は、契約に明記されたものだけで
 
 - `DEFAULT_PASSWORD` は `default-user` が解決対象に含まれる場合だけ
   build-rootfs.sh が必須検証する (モジュールを外せば framework は要求しない)
+- 値は環境にグローバル export されない。builder が 0600 の一時ファイルに保持し、
+  `default-user` の hook 起動時にだけ環境変数として注入する
+  (他モジュールの hook の環境には現れない)
 - 値をログ、生成 YAML (bdebstrap.yaml)、`resolved-modules.yaml` に出力しない
 - 外部モジュール導入時には、モジュールごとの入力宣言と環境の sanitize を
   別途設計する (それまで新しい環境変数契約は追加しない)

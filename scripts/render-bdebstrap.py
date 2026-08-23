@@ -61,6 +61,20 @@ snap_sec = f"https://snapshot.debian.org/archive/debian-security/{sec_snap}/"
 live_main = deb["mirror"].rstrip("/")
 live_sec = live_main.rsplit("/", 1)[0] + "/debian-security"
 
+def module_hook_cmd(m, h):
+    """module hook の起動行を生成する。
+    secret input (DEFAULT_PASSWORD) は契約どおり組み込み default-user の hook に
+    だけ環境注入する。値は環境にグローバル export されず、build-rootfs.sh が
+    用意する 0600 の一時ファイル (パスのみ $E54C_DEFAULT_PASSWORD_FILE で伝わる)
+    から hook 起動時に読む。生成 YAML に値もパスも埋め込まれない"""
+    if m["id"] == "default-user":
+        return (
+            'DEFAULT_PASSWORD="$(cat "$E54C_DEFAULT_PASSWORD_FILE")" '
+            f'"{h}" "$1"'
+        )
+    return f'"{h}" "$1"'
+
+
 customize_hooks = [
     # 自前ビルドのカーネル deb (out/debs) を最初にインストールする
     # カーネル deb の存在は build-rootfs.sh が事前検証済み (無ければここに来ない)。
@@ -125,7 +139,7 @@ customize_hooks = [
     # cmdline、DT overlay 等) を initramfs 生成前に反映できる位置に置く。
     # 実行ビットは resolver が検証済みで、shebang を尊重して直接実行する
     *[
-        f'"{h}" "$1"'
+        module_hook_cmd(m, h)
         for m in modules
         for h in m["hooks"].get("rootfs.customize", [])
     ],
@@ -147,7 +161,7 @@ customize_hooks = [
 # core final seal (machine-id / apt 設定 / sources 書き戻し等の framework
 # invariant) は必ずモジュールより後 (モジュールが封印後の成果物を書き戻せない)
 module_seal_hooks = [
-    f'"{h}" "$1"' for m in modules for h in m["hooks"].get("rootfs.seal", [])
+    module_hook_cmd(m, h) for m in modules for h in m["hooks"].get("rootfs.seal", [])
 ]
 
 config = {
