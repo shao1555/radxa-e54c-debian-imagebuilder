@@ -41,8 +41,8 @@ kernel:
 uboot:
   # 当面は Radxa の vendor U-Boot deb を流用する
   # (vendor U-Boot + extlinux で mainline カーネルが起動することは実証済み。
-  #  RK3582 の選別コア無効化も vendor U-Boot が DT を書き換えてくれる)
+  #  RK3582 の選別コア無効化も vendor U-Boot が DT を書き換えてくれる)。
+  # 導入する deb 自体は dependencies.lock.yaml で URL+sha256 を固定している。
+  # ここは成果物イメージに書き込む「配備後の更新用リポジトリ」の設定
   apt_repo: https://radxa-repo.github.io/bookworm
   apt_suite: bookworm
-  packages:
-    - u-boot-radxa-e54c

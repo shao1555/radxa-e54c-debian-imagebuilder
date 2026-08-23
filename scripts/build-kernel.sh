@@ -12,6 +12,10 @@ OUT="$TOP/out"
 # 親 make から MAKEFLAGS 経由でコマンドライン変数 (例: IMG_VERSION、かつて VERSION) が
 # カーネルの make に漏れて Makefile 変数を上書きしないよう、環境を消毒する
 unset MAKEFLAGS MAKELEVEL MAKEOVERRIDES MFLAGS 2>/dev/null || true
+# ビルド環境の snapshot 固定が lock と一致しているか (fail-fast。
+# ツールチェーンや linux-config seed の版がここで決まる)
+scripts/verify-build-env.sh
+
 # ソース展開・ビルドは高速なローカル FS で行う (macOS Docker の virtiofs 上では
 # tar のディレクトリ展開が失敗し、ビルドも著しく遅いため。devcontainer では
 # E54C_BUILD_DIR=/build が Docker ボリュームとしてマウントされる)
@@ -35,9 +39,26 @@ if [[ "$ver" == *-rc* ]]; then
 			https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git "$src"
 	fi
 else
-	major="${ver%%.*}"
+	# release 版は dependencies.lock.yaml の URL から取得し sha256 を検証する
+	# (キャッシュ済み tarball も毎回検証する。-rc 版の git clone は対象外)
+	lock_ver="$(python3 scripts/lock-get.py kernel.version)"
+	lock_url="$(python3 scripts/lock-get.py kernel.url)"
+	lock_sha="$(python3 scripts/lock-get.py kernel.sha256)"
+	if [[ "$lock_ver" != "$ver" ]]; then
+		echo "エラー: config.yaml (kernel.version=$ver) と dependencies.lock.yaml" >&2
+		echo "  (kernel.version=$lock_ver) が食い違っている。lock を更新すること" >&2
+		exit 1
+	fi
 	tar="$BUILD_BASE/src/linux-$ver.tar.xz"
-	[[ -f $tar ]] || curl -fL "https://cdn.kernel.org/pub/linux/kernel/v${major}.x/linux-$ver.tar.xz" -o "$tar"
+	# CDN の一時障害で大きなダウンロードが切れることがあるため、
+	# リトライ + レジューム (-C -) で取得する (完全性は直後の sha256 検証が担保)
+	[[ -f $tar ]] || curl -fL --retry 5 --retry-all-errors --retry-delay 10 -C - \
+		"$lock_url" -o "$tar"
+	sha256sum -c --status <<< "$lock_sha  $tar" || {
+		echo "エラー: linux-$ver.tar.xz の sha256 が lock と一致しない" >&2
+		rm -f "$tar"
+		exit 1
+	}
 	src="$BUILD_BASE/src/linux-$ver"
 	rm -rf "$src"
 	tar -C "$BUILD_BASE/src" -xf "$tar"

@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# ビルド時に取得する外部依存の lock ファイル (Issue #4)。
+# 目的は「同じコミット + この lock から同じ依存バージョン集合を再解決できる」こと。
+# 値の読み出しは scripts/lock-get.py、検証は各ビルドスクリプトが行う。
+# バージョンと sha256/url は必ずペアで更新する (更新 PR で差分レビューする)。
+schema: 1
+
+debian:
+  # ビルド時のパッケージ解決を固定する snapshot.debian.org の正準タイムスタンプ
+  # (rootfs の mmdebstrap と devcontainer の apt の両方で使う)。
+  # 生成される rootfs の sources.list は live リポジトリに書き戻され、
+  # 配備後の security update は妨げない。
+  # .devcontainer/Dockerfile のハードコード値と一致していること
+  # (scripts/verify-build-env.sh がビルド時に照合する)
+  snapshot: "20260821T205528Z"
+  security_snapshot: "20260821T212820Z"
+
+devcontainer:
+  # ビルド環境コンテナのベースイメージ (immutable digest で固定)。
+  # .devcontainer/Dockerfile の FROM と一致していること
+  base_image: "debian:trixie@sha256:34cd9e9fd437c0a095ec39cb2e73422c9f30821b0d0848ed74fd0d43bae4d958"
+
+kernel:
+  # config.yaml の kernel.version と一致していること (build-kernel.sh が検証)。
+  # sha256 は kernel.org の sha256sums.asc に記載の値。
+  # -rc 版 (git clone) は tarball が無いため、この節は release 版にのみ適用される。
+  # Renovate が version を更新し、url/sha256 は lock-refresh workflow が追随する
+  # renovate: datasource=github-tags depName=torvalds/linux extractVersion=^v(?<version>\d+\.\d+(\.\d+)?)$
+  version: "7.2"
+  url: "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.tar.xz"
+  sha256: "f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3"
+
+k3s:
+  # sha256 は GitHub release の sha256sum-arm64.txt に記載の k3s-arm64 の値。
+  # Renovate が version を更新し、url/sha256 は lock-refresh workflow が追随する
+  # renovate: datasource=github-releases depName=k3s-io/k3s
+  version: "v1.36.3+k3s1"
+  url: "https://github.com/k3s-io/k3s/releases/download/v1.36.3+k3s1/k3s-arm64"
+  sha256: "c9a209103f480f163b7c6a56f00862b4481927b284dc29a3716bb70d886691a8"
+
+radxa:
+  # Radxa の deb はビルド時に apt 解決せず、ここで固定した URL から取得して
+  # sha256 検証のうえ dpkg で投入する (upstream から消えた場合はビルドが失敗し
+  # 検出できる。恒久 mirror は別 Issue)。
+  # 成果物イメージには radxa リポジトリの sources.list と pin を残し、
+  # 配備後の更新経路は維持する
+  debs:
+    - package: radxa-archive-keyring
+      version: "0.2.2"
+      url: "https://radxa-repo.github.io/bookworm/pool/main/r/radxa-archive-keyring/radxa-archive-keyring_0.2.2_all.deb"
+      sha256: "3e3bb3d3150cf1dfa6c050d0c135f6a7f298b7638ff7e656fda711ababdb8a57"
+    - package: u-boot-rk2601 # u-boot-radxa-e54c の実体 (idbloader / u-boot.itb / setup.sh)
+      version: "2017.09-72"
+      url: "https://radxa-repo.github.io/bookworm/pool/main/u/u-boot-rk2601/u-boot-rk2601_2017.09-72_all.deb"
+      sha256: "f716b41db481716b9495635abad1ad84dcfb1cc0946ef2bab77bfbec5eab2987"
+    - package: u-boot-radxa-e54c # メタパッケージ (u-boot-rk2601 に依存)
+      version: "2017.09-72"
+      url: "https://radxa-repo.github.io/bookworm/pool/main/u/u-boot-rk2601/u-boot-radxa-e54c_2017.09-72_all.deb"
+      sha256: "3177b828d1a436339712caafb56a74fe98fa5c588cfb8fd6a27d480eab628853"

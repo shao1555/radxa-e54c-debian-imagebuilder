@@ -22,27 +22,19 @@ for line in (TOP / "packages.txt").read_text().splitlines():
 deb = cfg["debian"]
 ub = cfg["uboot"]
 suite = deb["suite"]
+components = " ".join(deb["components"])
 
-setup_hooks = [
-    # updates / security を有効化 (rsdk と同じ流儀)
-    f'head -n1 "$1/etc/apt/sources.list" | sed -E "s/({suite})/\\1-updates/" '
-    f'> "$1/etc/apt/sources.list.d/50-{suite}-updates.list"',
-    f'head -n1 "$1/etc/apt/sources.list" | sed -E -e "s/({suite})/\\1-security/" '
-    f'-e "s|/debian |/debian-security |" > "$1/etc/apt/sources.list.d/50-{suite}-security.list"',
-    # Radxa リポジトリ (U-Boot 専用に pin する)。
-    # keyring パッケージ自体がこのリポジトリから入る鶏卵問題があるため、
-    # build-rootfs.sh が取得した keyring ファイルを先に target へ直接コピーし、
-    # 最初から signed-by で参照する (apt 3.0/sqv は target 内の鍵しか見ない)
-    'mkdir -p "$1/usr/share/keyrings"',
-    # canonical 名は年次 keyring への symlink のため、実体ごとまとめてコピーする
-    f'cp -a "{TOP}"/out/rootfs/keyrings/radxa-archive-keyring*.gpg "$1/usr/share/keyrings/"',
-    f'echo "deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] '
-    f'{ub["apt_repo"]} {ub["apt_suite"]} main" > "$1/etc/apt/sources.list.d/80-radxa-uboot.list"',
-    'mkdir -p "$1/etc/apt/preferences.d"',
-    'printf "Package: *\\nPin: origin radxa-repo.github.io\\nPin-Priority: -1\\n\\n'
-    'Package: u-boot-* radxa-archive-keyring\\nPin: origin radxa-repo.github.io\\n'
-    'Pin-Priority: 500\\n" > "$1/etc/apt/preferences.d/radxa-uboot-only"',
-]
+# ビルド時のパッケージ解決は dependencies.lock.yaml の snapshot に固定する。
+# 生成された rootfs の sources.list は cleanup で live リポジトリに書き戻す
+# (配備後の security update を妨げない)
+lock = yaml.safe_load((TOP / "dependencies.lock.yaml").read_text())
+snap = lock["debian"]["snapshot"]
+sec_snap = lock["debian"]["security_snapshot"]
+snap_main = f"https://snapshot.debian.org/archive/debian/{snap}/"
+snap_sec = f"https://snapshot.debian.org/archive/debian-security/{sec_snap}/"
+# live のミラー (config.yaml)。security は Debian の標準命名から導出する
+live_main = deb["mirror"].rstrip("/")
+live_sec = live_main.rsplit("/", 1)[0] + "/debian-security"
 
 customize_hooks = [
     # 自前ビルドのカーネル deb (out/debs) を最初にインストールする
@@ -61,6 +53,25 @@ customize_hooks = [
     # headers も apt-get -f が削除して「成功」する可能性があるため実在を確認する
     'ls -d "$1"/usr/src/linux-headers-* > /dev/null 2>&1 || '
     '{ echo "エラー: linux-headers が rootfs にインストールされていない" >&2; exit 1; }',
+    # Radxa の deb (keyring / U-Boot)。apt 解決ではなく dependencies.lock.yaml で
+    # 固定した deb (build-rootfs.sh が取得・sha256 検証済み) を dpkg で投入する。
+    # dpkg -i は全 unpack 後にまとめて configure するため、メタパッケージと実体を
+    # 1 回で入れられる
+    f'mkdir -p "$1/tmp/radxa-debs" && cp "{TOP}"/out/rootfs/radxa-debs/*.deb "$1/tmp/radxa-debs/"',
+    'chroot "$1" sh -c "dpkg -i /tmp/radxa-debs/*.deb" && rm -rf "$1/tmp/radxa-debs"',
+    # U-Boot の書き込みスクリプト (build-image.sh が使う) と keyring の実在を確認
+    'test -x "$1/usr/lib/u-boot/radxa-e54c/setup.sh" || '
+    '{ echo "エラー: u-boot deb の投入に失敗 (setup.sh が無い)" >&2; exit 1; }',
+    'test -e "$1/usr/share/keyrings/radxa-archive-keyring.gpg" || '
+    '{ echo "エラー: radxa keyring の投入に失敗" >&2; exit 1; }',
+    # 配備後の U-Boot 更新経路として radxa リポジトリを設定しておく
+    # (ビルド時の apt はこのリポジトリに一切触れない。U-Boot 専用に pin する)
+    f'echo "deb [signed-by=/usr/share/keyrings/radxa-archive-keyring.gpg] '
+    f'{ub["apt_repo"]} {ub["apt_suite"]} main" > "$1/etc/apt/sources.list.d/80-radxa-uboot.list"',
+    'mkdir -p "$1/etc/apt/preferences.d"',
+    'printf "Package: *\\nPin: origin radxa-repo.github.io\\nPin-Priority: -1\\n\\n'
+    'Package: u-boot-* radxa-archive-keyring\\nPin: origin radxa-repo.github.io\\n'
+    'Pin-Priority: 500\\n" > "$1/etc/apt/preferences.d/radxa-uboot-only"',
     # files/ overlay をそのまま重ねる
     f'if [ -d "{TOP}/files" ]; then cp -a "{TOP}/files/." "$1/"; fi',
     # hostname
@@ -112,7 +123,15 @@ config = {
         "target": "rootfs.tar",
         "mode": "root",
         "variant": deb.get("variant", "apt"),
-        "mirrors": [deb["mirror"]],
+        # スペースを含む要素は sources.list の行として扱われる (mmdebstrap の仕様)。
+        # main/updates/security の 3 系統すべてを snapshot に固定する
+        "mirrors": [
+            f"deb {snap_main} {suite} {components}",
+            f"deb {snap_main} {suite}-updates {components}",
+            f"deb {snap_sec} {suite}-security {components}",
+        ],
+        # snapshot の Release は Valid-Until が過去日になり得るため無効化する
+        "aptopts": ['Acquire::Check-Valid-Until "false"'],
         "components": deb["components"],
         "packages": [
             # login: trixie では Essential でなくなり variant=apt に含まれない。
@@ -120,13 +139,24 @@ config = {
             # 一切ログインできなくなる (QEMU ブートテストで検出)
             "init", "sudo", "login", "systemd-boot", "initramfs-tools", "zstd",
             "u-boot-menu",  # u-boot-update (extlinux.conf 生成)
-            "radxa-archive-keyring",
-            *ub["packages"],
+            # radxa の keyring / U-Boot は apt 解決しない (dependencies.lock.yaml
+            # で固定した deb を customize hook が dpkg で投入する)
             *packages,
         ],
-        "setup-hooks": setup_hooks,
         "customize-hooks": customize_hooks,
         "cleanup-hooks": [
+            # mmdebstrap は aptopts を chroot 内の /etc/apt/apt.conf.d/99mmdebstrap
+            # にも保存する。Check-Valid-Until 無効化が成果物に残ると、配備後の
+            # apt が期限切れ Release を受理してしまうため必ず削除する
+            'rm -f "$1/etc/apt/apt.conf.d/99mmdebstrap"',
+            # ビルドは snapshot で解決したが、配備後の apt は live リポジトリを
+            # 参照させる (security update を受けられるように)。snapshot の URL が
+            # 成果物に残ってはいけない (smoke test が検査する)
+            f'echo "deb {live_main} {suite} {components}" > "$1/etc/apt/sources.list"',
+            f'echo "deb {live_main} {suite}-updates {components}" '
+            f'> "$1/etc/apt/sources.list.d/50-{suite}-updates.list"',
+            f'echo "deb {live_sec} {suite}-security {components}" '
+            f'> "$1/etc/apt/sources.list.d/50-{suite}-security.list"',
             # ビルドホストの DNS 設定 (mmdebstrap が入れる resolv.conf と、
             # systemd-resolved postinst が退避した .bak) を除去し、resolved の
             # stub への symlink に置き換える。単に削除するだけだと初回起動時に

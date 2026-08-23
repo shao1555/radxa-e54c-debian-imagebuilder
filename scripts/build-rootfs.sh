@@ -65,33 +65,57 @@ if ! grep -qE '^\./usr/lib/linux-image-[^/]+/rockchip/rk3582-radxa-e54c\.dtb$' <
 fi
 echo "kernel deb preflight passed: $(basename "$img_deb")"
 
+# ビルド環境の snapshot 固定が lock と一致しているか (fail-fast)
+scripts/verify-build-env.sh
+
 python3 scripts/render-bdebstrap.py "$OUT"
 
-# Radxa の APT 鍵 (U-Boot deb の取得に必要) をホスト側 keyring から拾えるよう準備
-KEYRING_DIR="$OUT/keyrings"
-mkdir -p "$KEYRING_DIR"
-cp -a /usr/share/keyrings/. "$KEYRING_DIR/" 2>/dev/null || true
-if [[ ! -f "$KEYRING_DIR/radxa-archive-keyring.gpg" ]]; then
-	# files.list から keyring deb の現行パスを解決して取得する
-	# (curl | grep -m1 は SIGPIPE で curl が exit 23 になり pipefail に殺されるため、
-	#  一旦変数に受けてから grep する)
-	repo="$(python3 -c "import yaml;print(yaml.safe_load(open('config.yaml'))['uboot']['apt_repo'])")"
-	files_list="$(curl -fsL "$repo/files.list")"
-	path="$(grep -m1 'radxa-archive-keyring_.*_all\.deb' <<< "$files_list" | sed 's|^\./||')"
-	curl -fL "$repo/$path" -o /tmp/radxa-keyring.deb
-	# radxa-archive-keyring.gpg は年次 keyring への symlink なので、実体ごと全て展開する
-	tmpk="$(mktemp -d)"
-	dpkg-deb --fsys-tarfile /tmp/radxa-keyring.deb | tar -x -C "$tmpk" ./usr/share/keyrings
-	cp -a "$tmpk/usr/share/keyrings/." "$KEYRING_DIR/"
-	rm -rf "$tmpk"
-	[[ -s "$(readlink -f "$KEYRING_DIR/radxa-archive-keyring.gpg")" ]] || {
-		echo "radxa keyring の展開に失敗" >&2; exit 1; }
-fi
+# Radxa の deb (keyring / U-Boot) は apt 解決せず、dependencies.lock.yaml で
+# 固定した URL から取得して sha256 検証する (customize hook が dpkg で投入する)。
+# mmdebstrap は radxa リポジトリに一切触れないため、keyring の事前準備も不要。
+# process substitution だと lock-get の失敗 (フィールド欠落等) が while に
+# 伝播しないため、先に変数へ受けて set -e で止まるようにする
+radxa_lock="$(python3 scripts/lock-get.py radxa.debs)"
+RADXA_DEBS="$OUT/radxa-debs"
+mkdir -p "$RADXA_DEBS"
+expected_debs=()
+while IFS=$'\t' read -r pkg ver url sha; do
+	deb="$RADXA_DEBS/$(basename "$url")"
+	expected_debs+=("$(basename "$url")")
+	if [[ ! -f $deb ]] || ! sha256sum -c --status <<< "$sha  $deb" 2> /dev/null; then
+		echo "downloading $pkg $ver ..."
+		curl -fL --retry 5 --retry-all-errors --retry-delay 10 "$url" -o "$deb"
+	fi
+	sha256sum -c --status <<< "$sha  $deb" || {
+		echo "エラー: $pkg の sha256 が lock と一致しない (upstream の改変または消失)" >&2
+		echo "  url: $url" >&2
+		rm -f "$deb"
+		exit 1
+	}
+	# deb のメタデータが lock の記載と一致することも確認する
+	# (URL の貼り間違いで「検証は通るが別物」になる事故を防ぐ)
+	deb_pkg="$(dpkg-deb -f "$deb" Package)"
+	deb_ver="$(dpkg-deb -f "$deb" Version)"
+	if [[ "$deb_pkg" != "$pkg" || "$deb_ver" != "$ver" ]]; then
+		echo "エラー: $deb の中身 ($deb_pkg $deb_ver) が lock の記載 ($pkg $ver) と違う" >&2
+		exit 1
+	fi
+done <<< "$radxa_lock"
+# lock に無いファイル (旧版など) が staging に残っていると customize hook の
+# dpkg -i *.deb に混入するため、掃除する
+for f in "$RADXA_DEBS"/*.deb; do
+	[[ -e $f ]] || continue
+	name="$(basename "$f")"
+	if [[ ! " ${expected_debs[*]} " == *" $name "* ]]; then
+		echo "removing stale $name (lock に無い)"
+		rm -f "$f"
+	fi
+done
+echo "radxa debs verified: ${expected_debs[*]}"
 
 $SUDO bdebstrap -c "$OUT/bdebstrap.yaml" \
 	--name "$OUT/build" \
-	--force \
-	--keyring "$KEYRING_DIR"
+	--force
 
 $SUDO chown -R "$(id -u):$(id -g)" "$OUT/build"
 echo "rootfs: $OUT/build/rootfs.tar"
