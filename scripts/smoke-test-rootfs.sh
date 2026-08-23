@@ -130,6 +130,26 @@ else
 fi
 check "/etc/kernel/cmdline"                '^-.* \./etc/kernel/cmdline$'
 check "U-Boot 書き込みスクリプト (実行可)" '^-rwx.* \./usr/lib/u-boot/radxa-e54c/setup\.sh$'
+# ビルドは Debian snapshot で解決するが、成果物の apt は live リポジトリを
+# 参照すること (snapshot URL が残ると配備後の security update が止まる)
+apt_sources="$(tar -xOf "$TAR" ./etc/apt/sources.list 2> /dev/null; \
+	for f in $(tar -tf "$TAR" | grep -E '^\./etc/apt/sources\.list\.d/.+\.list$'); do \
+		tar -xOf "$TAR" "$f" 2> /dev/null; done)"
+if grep -q 'snapshot\.debian\.org' <<< "$apt_sources"; then
+	echo "NG: 成果物の apt sources に snapshot URL が残っている"
+	fail=1
+else
+	echo "ok: 成果物の apt sources に snapshot URL が無い"
+fi
+for want in ' trixie ' ' trixie-updates ' ' trixie-security '; do
+	if grep -E "^deb https?://[^ ]*deb\.debian\.org/[^ ]+${want}" <<< "$apt_sources" > /dev/null; then
+		echo "ok: live リポジトリ (${want// /}) が設定されている"
+	else
+		echo "NG: live リポジトリ (${want// /}) が無い"
+		fail=1
+	fi
+done
+
 # Radxa deb は lock 固定の dpkg 投入だが、配備後の U-Boot 更新経路
 # (リポジトリ設定 + keyring) は成果物に残っていること
 check "radxa リポジトリの sources.list"    '\./etc/apt/sources\.list\.d/80-radxa-uboot\.list$'

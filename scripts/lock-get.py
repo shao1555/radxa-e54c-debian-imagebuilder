@@ -47,6 +47,13 @@ def validate_lock(lock):
     """どのキーを取得する場合でも、lock 全体の整合性を先に検証する"""
     if lock.get("schema") != 1:
         die(f"未対応の schema: {lock.get('schema')!r} (期待: 1)")
+    debian = lock.get("debian") or {}
+    for k in ("snapshot", "security_snapshot"):
+        if not re.fullmatch(r"\d{8}T\d{6}Z", str(debian.get(k, ""))):
+            die(f"debian.{k} の書式が不正 (例: 20260821T205528Z)")
+    base_image = str((lock.get("devcontainer") or {}).get("base_image", ""))
+    if not re.search(r"@sha256:[0-9a-f]{64}$", base_image):
+        die("devcontainer.base_image が digest (@sha256:...) で固定されていない")
     check_artifact("kernel", lock.get("kernel"))
     check_artifact("k3s", lock.get("k3s"))
     debs = (lock.get("radxa") or {}).get("debs")

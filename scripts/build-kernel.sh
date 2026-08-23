@@ -12,6 +12,10 @@ OUT="$TOP/out"
 # 親 make から MAKEFLAGS 経由でコマンドライン変数 (例: IMG_VERSION、かつて VERSION) が
 # カーネルの make に漏れて Makefile 変数を上書きしないよう、環境を消毒する
 unset MAKEFLAGS MAKELEVEL MAKEOVERRIDES MFLAGS 2>/dev/null || true
+# ビルド環境の snapshot 固定が lock と一致しているか (fail-fast。
+# ツールチェーンや linux-config seed の版がここで決まる)
+scripts/verify-build-env.sh
+
 # ソース展開・ビルドは高速なローカル FS で行う (macOS Docker の virtiofs 上では
 # tar のディレクトリ展開が失敗し、ビルドも著しく遅いため。devcontainer では
 # E54C_BUILD_DIR=/build が Docker ボリュームとしてマウントされる)

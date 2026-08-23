@@ -22,14 +22,19 @@ for line in (TOP / "packages.txt").read_text().splitlines():
 deb = cfg["debian"]
 ub = cfg["uboot"]
 suite = deb["suite"]
+components = " ".join(deb["components"])
 
-setup_hooks = [
-    # updates / security を有効化 (rsdk と同じ流儀)
-    f'head -n1 "$1/etc/apt/sources.list" | sed -E "s/({suite})/\\1-updates/" '
-    f'> "$1/etc/apt/sources.list.d/50-{suite}-updates.list"',
-    f'head -n1 "$1/etc/apt/sources.list" | sed -E -e "s/({suite})/\\1-security/" '
-    f'-e "s|/debian |/debian-security |" > "$1/etc/apt/sources.list.d/50-{suite}-security.list"',
-]
+# ビルド時のパッケージ解決は dependencies.lock.yaml の snapshot に固定する。
+# 生成された rootfs の sources.list は cleanup で live リポジトリに書き戻す
+# (配備後の security update を妨げない)
+lock = yaml.safe_load((TOP / "dependencies.lock.yaml").read_text())
+snap = lock["debian"]["snapshot"]
+sec_snap = lock["debian"]["security_snapshot"]
+snap_main = f"https://snapshot.debian.org/archive/debian/{snap}/"
+snap_sec = f"https://snapshot.debian.org/archive/debian-security/{sec_snap}/"
+# live のミラー (config.yaml)。security は Debian の標準命名から導出する
+live_main = deb["mirror"].rstrip("/")
+live_sec = live_main.rsplit("/", 1)[0] + "/debian-security"
 
 customize_hooks = [
     # 自前ビルドのカーネル deb (out/debs) を最初にインストールする
@@ -118,7 +123,15 @@ config = {
         "target": "rootfs.tar",
         "mode": "root",
         "variant": deb.get("variant", "apt"),
-        "mirrors": [deb["mirror"]],
+        # スペースを含む要素は sources.list の行として扱われる (mmdebstrap の仕様)。
+        # main/updates/security の 3 系統すべてを snapshot に固定する
+        "mirrors": [
+            f"deb {snap_main} {suite} {components}",
+            f"deb {snap_main} {suite}-updates {components}",
+            f"deb {snap_sec} {suite}-security {components}",
+        ],
+        # snapshot の Release は Valid-Until が過去日になり得るため無効化する
+        "aptopts": ['Acquire::Check-Valid-Until "false"'],
         "components": deb["components"],
         "packages": [
             # login: trixie では Essential でなくなり variant=apt に含まれない。
@@ -130,9 +143,16 @@ config = {
             # で固定した deb を customize hook が dpkg で投入する)
             *packages,
         ],
-        "setup-hooks": setup_hooks,
         "customize-hooks": customize_hooks,
         "cleanup-hooks": [
+            # ビルドは snapshot で解決したが、配備後の apt は live リポジトリを
+            # 参照させる (security update を受けられるように)。snapshot の URL が
+            # 成果物に残ってはいけない (smoke test が検査する)
+            f'echo "deb {live_main} {suite} {components}" > "$1/etc/apt/sources.list"',
+            f'echo "deb {live_main} {suite}-updates {components}" '
+            f'> "$1/etc/apt/sources.list.d/50-{suite}-updates.list"',
+            f'echo "deb {live_sec} {suite}-security {components}" '
+            f'> "$1/etc/apt/sources.list.d/50-{suite}-security.list"',
             # ビルドホストの DNS 設定 (mmdebstrap が入れる resolv.conf と、
             # systemd-resolved postinst が退避した .bak) を除去し、resolved の
             # stub への symlink に置き換える。単に削除するだけだと初回起動時に

@@ -65,6 +65,9 @@ if ! grep -qE '^\./usr/lib/linux-image-[^/]+/rockchip/rk3582-radxa-e54c\.dtb$' <
 fi
 echo "kernel deb preflight passed: $(basename "$img_deb")"
 
+# ビルド環境の snapshot 固定が lock と一致しているか (fail-fast)
+scripts/verify-build-env.sh
+
 python3 scripts/render-bdebstrap.py "$OUT"
 
 # Radxa の deb (keyring / U-Boot) は apt 解決せず、dependencies.lock.yaml で
