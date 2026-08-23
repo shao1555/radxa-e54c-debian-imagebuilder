@@ -1,0 +1,5 @@
+# systemd は初回ブート (machine-id 未設定) で preset-all を適用し、既定ポリシーは
+# "enable *" のため、enablement 状態を持たないユニットが勝手に有効化される。
+# k3s は「ユーザーが systemctl enable k3s で明示的に有効化する」方針のため、
+# ここで disable を宣言しておく (QEMU ブートテストで restart ループとして検出)
+disable k3s.service

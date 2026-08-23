@@ -43,10 +43,20 @@ part-set-bootable /dev/sda 2 true
 part-set-bootable /dev/sda 3 true
 part-set-gpt-type /dev/sda 2 C12A7328-F81F-11D2-BA4B-00A0C93EC93B
 part-set-gpt-type /dev/sda 3 0FC63DAF-8483-4772-8E79-3D69D8477DE4
+# GPT の legacy_boot 属性 (bit2 = 4)。U-Boot は bootable 印のある
+# パーティションだけを extlinux スキャンの対象にする (QEMU テストで検出。
+# rsdk も同じ指定を行っている)
+part-set-gpt-attributes /dev/sda 2 4
+part-set-gpt-attributes /dev/sda 3 4
 
 mkfs vfat /dev/sda1 label:config
 mkfs vfat /dev/sda2 label:efi
-mkfs ext4 /dev/sda3 label:rootfs
+
+echo "rootfs ext4: U-Boot の ext4 ドライバが読めないフィーチャーを無効化して作成"
+# trixie の e2fsprogs は orphan_file と metadata_csum_seed (incompat) を既定で
+# 有効にするが、U-Boot (vendor 2017.09 / mainline とも) はこれを読めず、
+# /boot/extlinux が見つからずブート不能になる (QEMU ブートテストで実際に検出)
+mkfs ext4 /dev/sda3 label:rootfs features:^orphan_file,^metadata_csum_seed
 
 mount /dev/sda3 /
 mkdir-p /config
@@ -131,7 +141,26 @@ if ! grep -qE '^No problems found\.' "$TMP/sgdisk-v"; then
 	exit 1
 fi
 
-# 4. rootfs のファイルシステム整合性 (--ro なのでイメージは変更されない)
+# 4. GPT の legacy_boot 属性 (bit2)。QEMU ブートテストはホストの u-boot-qemu で
+#    ブートするため、将来の U-Boot が非 bootable パーティションも走査するように
+#    なると欠落を検出できない。実機 (vendor U-Boot) の要件として静的に固定する
+for p in 2 3; do
+	attr="$(LC_ALL=C sgdisk -i "$p" "$IMG" | awk '/Attribute flags:/{print $3}')"
+	if (( (16#${attr:-0} & 4) == 0 )); then
+		echo "NG: パーティション $p に legacy_boot 属性 (bit2) が無い (attr=${attr:-取得失敗})" >&2
+		exit 1
+	fi
+done
+
+# 5. U-Boot が読めない ext4 フィーチャーが紛れ込んでいないこと
+#    (mke2fs.conf の既定変更などで再発し得るため、成果物で確認する)
+feat="$(guestfish --ro -a "$IMG" run : tune2fs-l /dev/sda3 | grep -i '^Filesystem features:')"
+if grep -qE 'orphan_file|metadata_csum_seed' <<< "$feat"; then
+	echo "NG: U-Boot 非互換の ext4 フィーチャーがある: $feat" >&2
+	exit 1
+fi
+
+# 6. rootfs のファイルシステム整合性 (--ro なのでイメージは変更されない)
 fsck_status="$(guestfish --ro -a "$IMG" run : fsck ext4 /dev/sda3 | tail -1)"
 if [[ "$fsck_status" != "0" ]]; then
 	echo "NG: e2fsck がエラーを報告 (status=$fsck_status)" >&2

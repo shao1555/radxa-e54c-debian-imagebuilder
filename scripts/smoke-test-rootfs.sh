@@ -87,6 +87,9 @@ else
 	echo "NG: debian が sudo グループに所属していない"
 	fail=1
 fi
+# login(1): trixie では Essential でないため variant=apt に含まれず、
+# 欠けるとシリアルコンソールからログイン不能になる (QEMU ブートテストで検出)
+check "login バイナリ (シリアルログインに必要)" '^-rwx.* \./usr/bin/login$'
 check "resolv.conf が resolved の stub へ symlink" \
 	'^l.* \./etc/resolv\.conf -> \.\./run/systemd/resolve/stub-resolv\.conf$'
 check_absent "ビルドホスト DNS の漏洩 (.resolv.conf.systemd-resolved.bak)" \
@@ -97,6 +100,20 @@ check "lan1 の .network 設定"             '\./etc/systemd/network/10-lan1\.ne
 # 通常ファイルも「^-(種別) + フルパス + 行末 $」で固定し、.bak/.old 等への
 # 誤一致を防ぐ。実行が必要なものは実行ビット (^-rwx) まで確認する
 check "カーネル (vmlinuz)"                 '^-.* \./boot/vmlinuz-[0-9][^ ]*$'
+# vmlinuz は非圧縮の ARM64 Image であること。bindeb-pkg の既定 (Image.gz) に
+# 戻ると vendor U-Boot 2017.09 は booti の gzip 展開に未対応でブート不能になる。
+# 先頭 2 バイトが gzip magic (1f 8b) でなく、offset 56 に "ARM\x64" があること
+vmlinuz_member="$(tar -tf "$TAR" | grep -E '^\./boot/vmlinuz-[0-9]' | head -1 || true)"
+# head -c が先にパイプを閉じると tar が SIGPIPE になるため || true で受ける
+# (od/tr は完走しており出力は完全)
+vmlinuz_hdr="$(tar -xOf "$TAR" "$vmlinuz_member" 2> /dev/null | head -c 64 \
+	| od -An -v -tx1 | tr -d ' \n' || true)"
+if [[ ${vmlinuz_hdr:0:4} != "1f8b" && ${vmlinuz_hdr:112:8} == "41524d64" ]]; then
+	echo "ok: vmlinuz が非圧縮の ARM64 Image (vendor U-Boot は gzip 非対応)"
+else
+	echo "NG: vmlinuz が非圧縮 ARM64 Image でない (先頭=${vmlinuz_hdr:0:4} magic@56=${vmlinuz_hdr:112:8})"
+	fail=1
+fi
 check "initrd"                             '^-.* \./boot/initrd\.img-[0-9][^ ]*$'
 check "E54C の DTB"                        '^-.* \./usr/lib/linux-image-[^ ]*/rockchip/rk3582-radxa-e54c\.dtb$'
 check "extlinux.conf (u-boot-update 生成)" '^-.* \./boot/extlinux/extlinux\.conf$'
@@ -118,6 +135,11 @@ check "U-Boot 書き込みスクリプト (実行可)" '^-rwx.* \./usr/lib/u-boo
 check "incus (実行可)"                     '^-rwx.* \./usr/bin/incus$'
 check "k3s バイナリ (実行可)"              '^-rwx.* \./usr/local/bin/k3s$'
 check "k3s の systemd unit"                '^-.* \./etc/systemd/system/k3s\.service$'
+# k3s は「既定では無効」。初回ブートの preset-all (Debian 既定 enable *) が
+# 勝手に enable して restart ループする回帰を踏んだため、preset ファイルで固定する
+check "k3s を disable する preset"         '^-.* \./etc/systemd/system-preset/50-e54c\.preset$'
+check_absent "k3s が enable されていない" \
+	'\./etc/systemd/system/multi-user\.target\.wants/k3s\.service'
 
 # AppArmor: カーネル側の有効化だけでは不十分で、apparmor_parser が無いと
 # incus が AppArmor サポートを無効化する

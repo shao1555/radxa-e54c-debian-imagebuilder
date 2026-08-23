@@ -88,7 +88,9 @@ customize_hooks = [
     # ブート用カーネル引数。root= は build-image.sh がイメージ作成時に UUID を注入する。
     # u-boot-update が /etc/kernel/cmdline を参照するよう /etc/default/u-boot を配線して
     # おくことで、実機での以後のカーネル更新でも root= が維持される
-    'echo "rw console=tty1 console=ttyS2,1500000n8" > "$1/etc/kernel/cmdline"',
+    # loglevel=5: auditd 不在時の kernel audit 記録 (NOTICE) 等がシリアル
+    # コンソールを洪水にするのを防ぐ (警告/エラーと systemd のブート表示は残る)
+    'echo "rw loglevel=5 console=tty1 console=ttyS2,1500000n8" > "$1/etc/kernel/cmdline"',
     'echo \'U_BOOT_PARAMETERS="$(cat /etc/kernel/cmdline)"\' >> "$1/etc/default/u-boot"',
     # カーネル導入後の起動整備。initramfs を先に確定させてから extlinux.conf を
     # 生成する (逆順だと initrd 行が欠けた extlinux.conf になり得る)。
@@ -113,7 +115,10 @@ config = {
         "mirrors": [deb["mirror"]],
         "components": deb["components"],
         "packages": [
-            "init", "sudo", "systemd-boot", "initramfs-tools", "zstd",
+            # login: trixie では Essential でなくなり variant=apt に含まれない。
+            # 無いと agetty が login(1) を exec できず、シリアルコンソールから
+            # 一切ログインできなくなる (QEMU ブートテストで検出)
+            "init", "sudo", "login", "systemd-boot", "initramfs-tools", "zstd",
             "u-boot-menu",  # u-boot-update (extlinux.conf 生成)
             "radxa-archive-keyring",
             *ub["packages"],

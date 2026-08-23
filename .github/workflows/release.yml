@@ -180,7 +180,8 @@ jobs:
   # システム操作のみなので、x86_64 アプライアンスで arm64 イメージを扱ってよい
   image:
     needs: rootfs
-    runs-on: ubuntu-latest
+    # ホストの guestfish / e2fsprogs の挙動に依存するため、ランナーは固定する
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
@@ -223,9 +224,41 @@ jobs:
             out/SHA512SUMS
           if-no-files-found: error
 
-  # ステージ 4: リリース作成のみ (devcontainer 不要・contents: write のみ)
+  # ステージ 4: QEMU ブートテスト。リリースと同一の .img.xz を U-Boot →
+  # extlinux → 実カーネルで実際にブートし、ゲスト内検査 (ログイン、networkd、
+  # 容量拡張、nft、incus、k3s) を通す。arm64 ゲストの QEMU は TCG になるため
+  # ランナーは x64 でよい (KVM は libguestfs の前処理にだけ効く)
+  boot-test:
+    needs: image
+    # ホストの qemu / u-boot-qemu の挙動に依存するため、ランナーは固定する
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image
+          path: out
+
+      - name: Enable KVM and install tools
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm qemu-utils u-boot-qemu ipxe-qemu expect \
+            openssh-client libguestfs-tools xz-utils
+          sudo chmod +r /boot/vmlinuz-*
+
+      - name: Boot test
+        run: scripts/boot-test.sh out/*.img.xz
+
+  # ステージ 5: リリース作成のみ (devcontainer 不要・contents: write のみ)
   release:
-    needs: [rootfs, image]
+    needs: [rootfs, image, boot-test]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-yaml \
         # イメージ組み立て
         libguestfs-tools gdisk parted \
+        # QEMU ブートテスト (scripts/boot-test.sh)
+        qemu-system-arm qemu-utils u-boot-qemu ipxe-qemu expect openssh-client \
         # 開発補助
         sudo less vim-tiny \
     && rm -rf /var/lib/apt/lists/*

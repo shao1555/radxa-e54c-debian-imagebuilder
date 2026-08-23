@@ -1,0 +1,168 @@
+#!/usr/bin/expect -f
+# SPDX-License-Identifier: GPL-2.0-only
+# QEMU 上でイメージをブートし、シリアルコンソール経由でログイン
+# (debian/debian → 初回パスワード変更の強制も通す) して boot-check.sh を実行し、
+# 最後にホスト側から実際の SSH ログイン (hostfwd 経由) を検証する。
+# 引数: <イメージ (raw)> <ゲスト内検査スクリプト> <SSH 転送ポート>
+
+set timeout 900
+set img [lindex $argv 0]
+set chk [lindex $argv 1]
+set sshport [lindex $argv 2]
+set newpass "BootTest-Passw0rd"
+
+spawn qemu-system-aarch64 \
+    -machine virt,accel=kvm:tcg -cpu cortex-a76 -smp 4 -m 2048 \
+    -bios /usr/lib/u-boot/qemu_arm64/u-boot.bin \
+    -drive file=$img,format=raw,if=virtio \
+    -netdev user,id=n0,hostfwd=tcp:127.0.0.1:$sshport-:22 \
+    -device virtio-net-pci,netdev=n0 \
+    -nographic -no-reboot
+set qemu_id $spawn_id
+
+# --- ログイン (debian/debian) ---
+# カーネルメッセージがプロンプトに割り込むと入力が化けることがあるため、
+# Password prompt が出ずに login prompt に戻された場合は数回リトライする
+expect {
+    -re "login: ?$" {}
+    eof { puts "\nBOOTTEST: NG - QEMU が終了した (起動失敗)"; exit 1 }
+    timeout { puts "\nBOOTTEST: NG - login prompt に到達しなかった"; exit 1 }
+}
+set timeout 60
+set logged_in 0
+for {set try 0} {$try < 3} {incr try} {
+    send "debian\r"
+    expect {
+        "Password:" { send "debian\r"; set logged_in 1; break }
+        -re "login: ?$" { continue }
+        timeout {
+            # プロンプトが埋もれた可能性。改行で getty を叩き直す
+            send "\r"
+            expect {
+                -re "login: ?$" { continue }
+                timeout {}
+            }
+        }
+    }
+}
+if {!$logged_in} { puts "\nBOOTTEST: NG - Password prompt が出ない"; exit 1 }
+set timeout 900
+
+# --- 初回ログインのパスワード変更強制 (chage -d 0 の検証を兼ねる) ---
+expect {
+    -re {[Cc]urrent password:} { send "debian\r" }
+    timeout { puts "\nBOOTTEST: NG - パスワード変更の強制が発動しない"; exit 1 }
+}
+expect {
+    -re {[Nn]ew password:} { send "$newpass\r" }
+    timeout { puts "\nBOOTTEST: NG - New password prompt が出ない"; exit 1 }
+}
+expect {
+    -re {[Rr]e(type|peat).*password:} { send "$newpass\r" }
+    timeout { puts "\nBOOTTEST: NG - Retype prompt が出ない"; exit 1 }
+}
+puts "\nBOOTTEST: 初回パスワード変更を通過"
+
+# パスワード変更後はセッションが切られて再ログインになる場合と、
+# そのままシェルに入る場合の両方がある
+expect {
+    -re {\$ $} {}
+    -re "login: ?$" {
+        send "debian\r"
+        expect "Password:"
+        send "$newpass\r"
+        expect {
+            -re {\$ $} {}
+            timeout { puts "\nBOOTTEST: NG - 再ログインに失敗"; exit 1 }
+        }
+    }
+    timeout { puts "\nBOOTTEST: NG - シェルに到達しなかった"; exit 1 }
+}
+puts "\nBOOTTEST: ログイン成功"
+
+# --- root へ昇格 (sudo 所属の検証を兼ねる) ---
+set timeout 120
+send "sudo -s\r"
+expect {
+    -re {[Pp]assword for debian:} { send "$newpass\r"; exp_continue }
+    -re "# $" {}
+    timeout { puts "\nBOOTTEST: NG - sudo で root になれない"; exit 1 }
+}
+
+# --- 検査スクリプトをシリアル経由で転送して実行 ---
+# ここからはプロンプト ("# $") 照合を使わない: readline がコマンドラインを
+# 再描画するとプロンプト断片がエコーに混ざり、誤一致で入力が先走る (実際に
+# 踏んだ)。エコー自体を止め、コマンドの完了は一意なセンチネル出力で同期する。
+# センチネルはクォート分割 (SYNC_"1" 等) で書き、仮にエコーされても
+# コマンド行自体には完全な文字列が現れないようにする
+send "stty -echo; echo SYNC_\"1\"\r"
+expect {
+    -ex "SYNC_1" {}
+    timeout { puts "\nBOOTTEST: NG - シェルとの同期に失敗"; exit 1 }
+}
+# 対話 bash はヒアドキュメントの行も readline で読むため、素のまま送ると
+# TAB インデントが補完動作に化けて内容が壊れる。base64 で転送する
+set f [open $chk r]
+fconfigure $f -translation binary
+set chk_data [read $f]
+close $f
+send "base64 -d > /tmp/boot-check.sh << 'EOF_BOOTCHECK'\r"
+foreach line [split [binary encode base64 -maxlen 76 $chk_data] "\n"] {
+    send -- "$line\r"
+}
+send "EOF_BOOTCHECK\r"
+send "echo SYNC_\"2\"\r"
+expect {
+    -ex "SYNC_2" {}
+    timeout { puts "\nBOOTTEST: NG - 検査スクリプトの転送が完了しなかった"; exit 1 }
+}
+
+set timeout 600
+send "sh /tmp/boot-check.sh; echo CHK_\"DONE\"\r"
+set result -1
+expect {
+    -re {BOOTTEST_RESULT=(\d)} {
+        set result $expect_out(1,string)
+    }
+    -ex "CHK_DONE" { puts "\nBOOTTEST: NG - 検査スクリプトが結果を出さず終了した"; exit 1 }
+    timeout { puts "\nBOOTTEST: NG - 検査スクリプトが完了しなかった"; exit 1 }
+}
+expect -ex "CHK_DONE"
+
+# --- ホストから実 SSH ログイン (hostfwd 経由、成果物の受け入れ基準) ---
+# ゲスト内検査 (sshd 稼働・鍵生成) とは別に、外から本当に入れることを確かめる
+set timeout 120
+spawn ssh -p $sshport -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=30 -o NumberOfPasswordPrompts=1 -o PreferredAuthentications=password \
+    debian@127.0.0.1 echo SSH_LOGIN_OK
+set ssh_ok 0
+expect {
+    -re {[Pp]assword:} { send "$newpass\r"; exp_continue }
+    "SSH_LOGIN_OK" { set ssh_ok 1 }
+    eof {}
+    timeout {}
+}
+catch { wait }
+set spawn_id $qemu_id
+if {$ssh_ok} {
+    puts "\nBOOTTEST: SSH ログイン成功 (127.0.0.1:$sshport)"
+} else {
+    puts "\nBOOTTEST: NG - SSH でログインできない"
+    set result 1
+}
+
+# --- 終了 ---
+set timeout 120
+send "poweroff\r"
+expect {
+    eof {}
+    timeout { puts "\nBOOTTEST: 警告 - poweroff がタイムアウト (結果には影響しない)" }
+}
+
+if {$result == 0} {
+    puts "\nBOOTTEST: PASSED"
+    exit 0
+} else {
+    puts "\nBOOTTEST: FAILED (検査 NG あり。上の BOOTCHK NG / SSH 行を参照)"
+    exit 1
+}
