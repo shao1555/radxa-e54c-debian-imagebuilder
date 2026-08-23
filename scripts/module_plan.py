@@ -101,9 +101,30 @@ def sha256_file(path):
     return "sha256:" + h.hexdigest()
 
 
+def canonical_dumps(obj, what, **kwargs):
+    """JSON 互換値のみを許す serialize。PyYAML は .nan / .inf を float として
+    読むが、RFC 8259 の JSON には表現が無い (json.dumps の既定は非標準の
+    NaN / Infinity を書き出してしまう) ため、canonical 化の境界で拒否する"""
+    try:
+        return json.dumps(obj, sort_keys=True, ensure_ascii=False,
+                          allow_nan=False, **kwargs)
+    except ValueError as e:
+        raise ResolveError(
+            f"{what}: JSON 互換でない数値 (NaN / Infinity) を含む"
+        ) from e
+
+
+def json_loads_strict(text, what):
+    """json.loads は既定で非標準の NaN / Infinity を受理するため、
+    plan などの信頼境界では明示的に拒否する"""
+    def reject(token):
+        raise ResolveError(f"{what}: JSON 互換でない数値 ({token}) を含む")
+    return json.loads(text, parse_constant=reject)
+
+
 def canonical_digest(obj):
     """digest 計算用の canonical serialize (key sort・固定 separator・UTF-8)"""
-    data = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    data = canonical_dumps(obj, "canonical digest", separators=(",", ":"))
     return sha256_bytes(data.encode("utf-8"))
 
 
@@ -641,8 +662,10 @@ def resolve_module_config(request, candidate):
         return {}
     merged = merge_configuration(conf["defaults"], override or {})
     # canonical JSON として正規化し、入力 mapping の記述順に依存しない
+    # (JSON 互換でない数値 = NaN / Infinity はここで拒否される)
     merged = json.loads(
-        json.dumps(merged, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        canonical_dumps(merged, f"{mid}: 解決済み configuration",
+                        separators=(",", ":"))
     )
     schema_validate(merged, conf["schema"], f"{mid}: 解決済み configuration")
     return merged
@@ -662,7 +685,7 @@ def order_modules(modules):
 def write_plan_atomic(plan, output):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(plan, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+    data = canonical_dumps(plan, "ModulePlan", indent=2) + "\n"
     fd, tmp = tempfile.mkstemp(dir=output.parent, prefix=".module-plan.")
     try:
         with os.fdopen(fd, "w") as f:
@@ -676,7 +699,7 @@ def write_plan_atomic(plan, output):
 # --- consumer 側の検証 API ---------------------------------------------------
 
 def load_plan(workspace, plan_path):
-    plan = json.loads(Path(plan_path).read_text())
+    plan = json_loads_strict(Path(plan_path).read_text(), "ModulePlan")
     schema_validate(plan, load_schema(workspace, "module-plan.schema.json"), "ModulePlan")
     # 全 digest を本体から再検算して照合する (どれか 1 つだけ更新した改ざん
     # plan が sidecar 照合や cache key を通過するのを防ぐ)

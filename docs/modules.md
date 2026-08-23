@@ -95,6 +95,8 @@ secrets:                       # secret input の宣言 (任意)
   ときだけ通常の値) → merge 結果を schema で検証 → `ModulePlan.modules[].config`
 - 未知の module ID への設定、未知の property、型・pattern 違反、
   required 不足、defaults 自体の schema 違反はすべて fail-fast
+- 数値は JSON 互換 (有限) のみ。YAML の `.nan` / `.inf` は canonical JSON
+  (RFC 8259) に表現が無いため解決時に拒否される (plan の parse 境界でも拒否)
 - 解決済み config は artifact digest に含まれる (設定変更で rootfs が再構築される)
 
 ### スクリプト参照の制限
@@ -164,6 +166,11 @@ module 固有の secret 定義は framework コードにハードコードされ
   環境変数名がここと交差する参照は拒否される (resolve 時・plan load 時・
   builder の materialize 時の三重で検査する。交差を許すと export / unset が
   secret 値とファイルパスを混線させ得る)
+- source の参照は builder プロセスの**実環境変数のみ** (printenv) を見る。
+  スクリプトの shell 内部変数は source にならず、framework の内部状態と
+  source 名前空間が交差しない (builder スクリプトの内部変数は小文字に統一)。
+  bash の readonly 変数 (`EUID` 等) は unset できないため source として拒否
+  される。`.env` は export 付き (`set -a`) で source される
 - **注意**: secret ファイルパスの capability は同一ビルド内の全 hook が読める。
   MVP では組み込みモジュールを単一の trust domain として許容しており、
   外部モジュール対応前に per-hook の隔離 (sanitized environment /

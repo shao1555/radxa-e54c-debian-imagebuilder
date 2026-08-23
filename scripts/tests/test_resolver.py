@@ -347,6 +347,17 @@ class ResolverTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("consumer が plan に無い", r.stderr)
 
+    def test_plan_with_nonfinite_number_rejected(self):
+        # json.loads は既定で非標準の NaN / Infinity を受理するため、
+        # plan の parse 境界で明示的に拒否する
+        _, path = self.plan()
+        plan = json.loads(path.read_text())
+        plan["modules"][0]["packages"]["apt"] = [float("nan")]
+        path.write_text(json.dumps(plan, sort_keys=True, indent=2))
+        r = self.verify(path)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("JSON 互換でない数値", r.stderr)
+
     def test_required_secrets_verb_rejects_undeclared(self):
         # secret 値を読む consumer (build-rootfs.sh) が使う required-secrets verb
         # 自体が、materialize (副作用) より前に宣言整合で拒否すること
@@ -705,6 +716,23 @@ class ConfigurationTest(unittest.TestCase):
                         secret_refs=GAMMA_REF)
         plan, _ = self.plan()
         self.assertEqual(self.gamma(plan)["config"]["deep"], {"k": 5})
+
+    def test_nonfinite_override_rejected(self):
+        # PyYAML は .nan / .inf を float として読み、jsonschema は number として
+        # 通すが、canonical JSON (RFC 8259) に表現が無いため解決時に拒否する
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(self.ws, schema_extra={"ratio": {"type": "number"}})
+        set_config_yaml(self.ws, module_config={"gamma": {"ratio": float("nan")}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("JSON 互換でない数値")
+
+    def test_nonfinite_defaults_rejected(self):
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(
+            self.ws,
+            defaults={"name": "abc", "nested": {"a": 1}, "ratio": float("inf")},
+            schema_extra={"ratio": {"type": "number"}})
+        self.assert_fail("JSON 互換でない数値")
 
     def tamper_config(self, path, name_value):
         plan = json.loads(path.read_text())

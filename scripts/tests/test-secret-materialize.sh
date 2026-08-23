@@ -102,6 +102,26 @@ else
 	echo "ok: 未設定 source は明示的に失敗する"
 fi
 
+# --- 参照は実プロセス環境のみ (shell 内部変数は source にならない) ---
+env_i="$(enc module-i internal)"
+SHELL_ONLY_VAR="not-exported"
+if (materialize_secrets "$DIR" <<< "$(printf 'internal\tmodule-i\tSHELL_ONLY_VAR\t%s' "$env_i")") 2> /dev/null; then
+	echo "NG: export されていない shell 変数を source として読んでしまった" >&2
+	fail=1
+else
+	echo "ok: export されていない shell 変数は「未設定」として失敗する"
+fi
+unset SHELL_ONLY_VAR
+
+# --- readonly 変数 (EUID 等) は source にできない ---
+env_j="$(enc module-j ro)"
+if (materialize_secrets "$DIR" <<< "$(printf 'ro\tmodule-j\tEUID\t%s' "$env_j")") 2> /dev/null; then
+	echo "NG: readonly 変数 (EUID) でも成功してしまった" >&2
+	fail=1
+else
+	echo "ok: readonly 変数 (EUID) は明示的に失敗する"
+fi
+
 # --- source 名が予約名前空間 (E54C_SECRET_FILE_*) と交差したら失敗する ---
 env_h="$(enc module-h token)"
 export E54C_SECRET_FILE_FOO="value"
