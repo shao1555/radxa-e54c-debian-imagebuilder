@@ -27,6 +27,10 @@ jobs:
       packages: write
     outputs:
       image: ${{ steps.tag.outputs.image }}
+      # base_config=debian の seed (linux-config パッケージ) の識別子。
+      # kernel ジョブがキャッシュキーに使う (kernel ジョブでのイメージ pull を
+      # 避けるため、イメージを手元に持つこのジョブで取得する)
+      seed: ${{ steps.seed.outputs.seed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -54,6 +58,13 @@ jobs:
             docker push "$img"
           fi
 
+      - name: Extract kernel config seed version
+        id: seed
+        run: |
+          img="${{ steps.tag.outputs.image }}"
+          echo "seed=$(docker run --rm "$img" \
+            dpkg-query -W -f '${Package}=${Version}' 'linux-config-*')" >> "$GITHUB_OUTPUT"
+
   # ステージ 1: カーネル deb。入力が変わらなければキャッシュ復元だけで数秒
   kernel:
     needs: devcontainer
@@ -63,26 +74,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       # キャッシュキーの構成要素:
       # - config.yaml は kernel セクションのみハッシュする (hostname 等の変更で
       #   63 分のカーネル再ビルドが走るのを防ぐ)
-      # - base_config=debian の seed は devcontainer 内の linux-config パッケージ
-      #   のため、そのバージョンをキーに含める (seed 更新の取りこぼしと、
-      #   キャッシュ消失時に同一コミットから異なるカーネルが出るのを防ぐ)
+      # - base_config=debian の seed (devcontainer 内の linux-config パッケージ)
+      #   のバージョンを含める (seed 更新の取りこぼしと、キャッシュ消失時に
+      #   同一コミットから異なるカーネルが出るのを防ぐ)。値は devcontainer
+      #   ジョブが出力する (このジョブでイメージを pull しないため、
+      #   キャッシュヒット時は数秒で終わる性質を保つ)
       - name: Compute kernel cache key
         id: key
         run: |
-          img="${{ needs.devcontainer.outputs.image }}"
-          ksec="$(docker run --rm -v "$PWD":/ws -w /ws "$img" python3 -c "import yaml, json, hashlib; k = yaml.safe_load(open('config.yaml'))['kernel']; print(hashlib.sha256(json.dumps(k, sort_keys=True).encode()).hexdigest()[:16])")"
-          seed="$(docker run --rm "$img" dpkg-query -W -f '${Package}=${Version}' 'linux-config-*')"
-          echo "key=kernel-debs-${{ runner.arch }}-${ksec}-${seed}-${{ hashFiles('kernel/**', 'scripts/build-kernel.sh') }}" >> "$GITHUB_OUTPUT"
+          python3 -c "import yaml" 2> /dev/null || pip install --quiet PyYAML
+          ksec="$(python3 -c "import yaml, json, hashlib; k = yaml.safe_load(open('config.yaml'))['kernel']; print(hashlib.sha256(json.dumps(k, sort_keys=True).encode()).hexdigest()[:16])")"
+          echo "key=kernel-debs-${{ runner.arch }}-${ksec}-${{ needs.devcontainer.outputs.seed }}-${{ hashFiles('kernel/**', 'scripts/build-kernel.sh') }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore kernel debs
         id: debs
@@ -99,6 +104,14 @@ jobs:
           key: ccache-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: |
             ccache-${{ runner.arch }}-
+
+      - name: Log in to GHCR
+        if: steps.debs.outputs.cache-hit != 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build kernel
         if: steps.debs.outputs.cache-hit != 'true'
@@ -166,9 +179,12 @@ jobs:
             "${{ needs.devcontainer.outputs.image }}" scripts/build-rootfs.sh
 
       # キャッシュ復元・新規ビルドのどちらの経路でも回帰検査を通す
-      # (tar の listing 検査のみなのでコンテナ不要)
+      # (tar listing + initrd 内部検査。lsinitramfs が必要)
       - name: Smoke test rootfs
-        run: scripts/smoke-test-rootfs.sh
+        run: |
+          command -v lsinitramfs > /dev/null || \
+            sudo apt-get install -y --no-install-recommends initramfs-tools-core
+          scripts/smoke-test-rootfs.sh
 
       - name: Upload rootfs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

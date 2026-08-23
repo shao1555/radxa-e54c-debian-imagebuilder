@@ -156,6 +156,24 @@ done
 # (dw_mmc) を検証できず、ここで静的に固定する
 check "dw_mmc-rockchip モジュール (microSD ブートに必要)" \
 	"/dw_mmc-rockchip\\.ko(\\.(gz|xz|zst))?\$"
+# rootfs をマウントする前段の initramfs にも収録されていること (モジュール deb に
+# あっても initrd から漏れると microSD ブート不能。initrd は early cpio 連結 +
+# zstd 圧縮のため lsinitramfs で内部を見る)
+initrd_member="$(tar -tf "$TAR" | grep -E '^\./boot/initrd\.img-[0-9]' | head -1 || true)"
+if ! command -v lsinitramfs > /dev/null; then
+	echo "NG: lsinitramfs が無い (initramfs-tools-core を入れること。initrd 検査に必要)"
+	fail=1
+elif tar -xOf "$TAR" "$initrd_member" 2> /dev/null > "${TMPDIR:-/tmp}/e54c-initrd.$$" \
+	&& lsinitramfs "${TMPDIR:-/tmp}/e54c-initrd.$$" \
+		| grep -E '/dw_mmc-rockchip\.ko(\.(gz|xz|zst))?$' > /dev/null; then
+	# grep -q は初一致でパイプを閉じ lsinitramfs が SIGPIPE 死する (pipefail で偽になる)
+	echo "ok: initramfs に dw_mmc-rockchip が収録されている"
+	rm -f "${TMPDIR:-/tmp}/e54c-initrd.$$"
+else
+	echo "NG: initramfs に dw_mmc-rockchip が無い (microSD からブートできない)"
+	rm -f "${TMPDIR:-/tmp}/e54c-initrd.$$"
+	fail=1
+fi
 
 # デバッグシンボル (linux-image-*-dbg) は ~500MiB あり軽量方針に反する
 check_absent "カーネルのデバッグシンボルが入っていない" '\./usr/lib/debug/'

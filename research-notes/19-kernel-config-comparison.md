@@ -106,6 +106,8 @@ merge_config は fragment を最後に重ねるので、Debian ベースでも
 
 **結論: ハードウェアサポートの面で Debian ベース化に不足は無い。**
 唯一の実ギャップ (NET_DSA_REALTEK) は既存 fragment が既に埋めている。
-トレードオフはビルド時間のみで、切替は「fragment 変更なしで config.yaml の
-base_config を debian にするだけ」で成立する。切替後は実機での
-スイッチ疎通確認 (lan1-4、VLAN) を最初のマイルストーンにするのがよい。
+トレードオフはビルド時間のみ。切替は config.yaml の base_config 変更に加えて
+上記の fragment 調整 (緩和 1 件 + microSD ドライバの明示 2 件) と、
+モジュール圧縮 (.ko.xz)・CI キャッシュキーへの対応を伴った。切替後は実機での
+スイッチ疎通確認 (lan1-4、VLAN) と microSD ブートを最初のマイルストーンに
+するのがよい。
