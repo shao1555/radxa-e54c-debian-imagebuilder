@@ -4,6 +4,8 @@
   "labels": ["dependencies"],
   "timezone": "Asia/Tokyo",
   "automerge": false,
+  "schedule": ["* 0-8 * * 1"],
+  "prConcurrentLimit": 2,
   "packageRules": [
     {
       "description": "GitHub Actions はコミット SHA 固定を維持する",
@@ -11,10 +13,20 @@
       "pinDigests": true
     },
     {
-      "description": "kernel は minor/patch のみ自動 PR (major は手動判断)",
+      "description": "kernel は minor/patch のみ自動 PR (major は手動判断)。直後の緊急修正を待つため 3 日置く",
+      "matchDepNames": ["torvalds/linux"],
+      "minimumReleaseAge": "3 days"
+    },
+    {
       "matchDepNames": ["torvalds/linux"],
       "matchUpdateTypes": ["major"],
       "enabled": false
+    },
+    {
+      "description": "k3s: semver はビルドメタデータ (+k3sN) を無視するため、同一 k8s 版の k3s 再リリースも拾えるよう regex versioning を使う。day-0 リリース回避に 7 日置く",
+      "matchDepNames": ["k3s-io/k3s"],
+      "versioning": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)\\+k3s(?<build>\\d+)$",
+      "minimumReleaseAge": "7 days"
     }
   ],
   "customManagers": [
