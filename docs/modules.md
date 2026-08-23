@@ -129,6 +129,7 @@ rootfs 生成の全体順序:
 
 | 変数 | 内容 |
 |---|---|
+| `E54C_MODULE_ID` | 実行中のモジュール ID |
 | `E54C_ROOTFS_TAR` | rootfs.tar の絶対パス (内容の抽出検査に使う) |
 | `E54C_ROOTFS_LISTING` | `tar -tvf` の出力を保存した一時ファイル (listing はビルドごとに一度だけ生成される) |
 | `E54C_TEST_LIB` | 共通 helper。`source "$E54C_TEST_LIB"` して使う |
@@ -149,10 +150,12 @@ bundle (tar) にまとめてシリアル経由で 1 回だけ転送し、dispatc
 (`scripts/boot-test-run.sh`) が各テストを**独立した subprocess** で実行する
 (同一シェルスコープへの連結だと変数・関数・`exit`・trap が衝突するため)。
 
-- `E54C_BOOT_TEST_LIB` に共通 helper のパスが設定される。
+- `E54C_BOOT_TEST_LIB` に共通 helper のパスが、`E54C_MODULE_ID` に実行中の
+  モジュール ID が設定される (core テストでは空)。
   `. "$E54C_BOOT_TEST_LIB"` で `chk` と `$fail` を得て、末尾で `exit "$fail"`
-- 出力には `module[<id>]` が前置され、dispatcher が結果を集約して
-  `BOOTTEST_RESULT` を出力する
+- 出力には `module[<id>]` が前置され、dispatcher が結果を集約して行頭の
+  `BOOTTEST_RESULT` を出力する (モジュール出力は前置により行頭に現れないため、
+  最終結果を偽装できない)
 - シリアル転送のため各行は短く保つこと
 - ホスト側からの実 SSH ログイン検査は core harness (expect) が担当する
   (module テストの host-side phase は将来の Issue)

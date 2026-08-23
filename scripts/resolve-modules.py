@@ -82,6 +82,8 @@ def resolve():
     else:
         mod_dirs = []
     for mod_dir in mod_dirs:
+        if mod_dir.is_symlink():
+            die(f"{mod_dir.name}: モジュールディレクトリが symlink (禁止)")
         yml = mod_dir / "module.yaml"
         if not yml.is_file():
             die(f"{mod_dir.name}: module.yaml が無い")
@@ -119,6 +121,10 @@ def resolve():
             src_dir = mod_dir / src
             if src_dir.is_symlink() or not src_dir.is_dir():
                 die(f"{mid}: overlays.source '{src}' がディレクトリとして存在しない")
+            # 中間コンポーネントの symlink による脱出も拒否する
+            # (src_dir 自体が symlink でなくても、親が module 外を指し得る)
+            if not src_dir.resolve().is_relative_to(mod_dir.resolve()):
+                die(f"{mid}: overlays.source '{src}' がモジュール外を指している")
             overlays.append(str(src_dir))
 
         # --- hooks ---

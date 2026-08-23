@@ -210,7 +210,7 @@ for m in json.load(sys.stdin):
 while IFS=$'\t' read -r mid t; do
 	[[ -n $mid ]] || continue
 	echo "module[$mid] rootfs test: ${t#"$TOP"/}"
-	if "$t" 2>&1 | sed "s/^/module[$mid] /"; then
+	if E54C_MODULE_ID="$mid" "$t" 2>&1 | sed "s/^/module[$mid] /"; then
 		:
 	else
 		echo "NG: module[$mid] の rootfs test が失敗 (${t#"$TOP"/})"

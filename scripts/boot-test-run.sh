@@ -8,9 +8,9 @@ dir="$(cd "$(dirname "$0")" && pwd)"
 export E54C_BOOT_TEST_LIB="$dir/test-lib.sh"
 total=0
 
-run_one() { # <ラベル> <スクリプト>
+run_one() { # <ラベル> <スクリプト> <モジュール ID (core は空)>
 	out="$dir/.out.$$"
-	"$2" > "$out" 2>&1
+	E54C_MODULE_ID="$3" "$2" > "$out" 2>&1
 	rc=$?
 	sed "s/^/$1 /" "$out"
 	rm -f "$out"
@@ -20,13 +20,13 @@ run_one() { # <ラベル> <スクリプト>
 	fi
 }
 
-run_one "core" "$dir/core.sh"
+run_one "core" "$dir/core.sh" ""
 for d in "$dir"/modules/*/; do
 	[ -d "$d" ] || continue
 	mid="$(basename "$d")"
 	for t in "$d"*.sh; do
 		[ -e "$t" ] || continue
-		run_one "module[$mid]" "$t"
+		run_one "module[$mid]" "$t" "$mid"
 	done
 done
 

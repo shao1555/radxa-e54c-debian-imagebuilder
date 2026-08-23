@@ -302,6 +302,9 @@ jobs:
       # 解決済みモジュール一覧 (キャッシュヒット経路でも必ず生成する)
       - name: Build environment manifest
         run: |
+          # ビルドがコンテナ内 root で out/meta を作成した場合、ランナー側から
+          # 書き込めない (Permission denied) ため、所有権を取り戻してから書く
+          [ -d out/meta ] && sudo chown -R "$(id -u):$(id -g)" out/meta
           mkdir -p out/meta
           docker run --rm "${{ needs.devcontainer.outputs.image }}" \
             dpkg-query -W -f '${Package}=${Version}\n' > out/meta/build-env-arm64.txt

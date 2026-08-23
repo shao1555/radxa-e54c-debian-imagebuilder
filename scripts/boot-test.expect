@@ -123,7 +123,10 @@ set timeout 600
 send "/tmp/boot-tests/run.sh; echo CHK_\"DONE\"\r"
 set result -1
 expect {
-    -re {BOOTTEST_RESULT=(\d)} {
+    -re {[\r\n]BOOTTEST_RESULT=(\d)} {
+        # 行頭アンカー: モジュール出力は dispatcher が "module[id] " を前置する
+        # ため、モジュールが BOOTTEST_RESULT を出力しても行頭には現れない
+        # (最終結果の偽装防止)
         set result $expect_out(1,string)
     }
     -ex "CHK_DONE" { puts "\nBOOTTEST: NG - 検査スクリプトが結果を出さず終了した"; exit 1 }
