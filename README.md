@@ -97,6 +97,13 @@ CI は **devcontainer / kernel / rootfs / image / release の 5 ジョブ**の�
 - **SSH ホスト鍵**: イメージには焼き込まれず(全端末が同一鍵を共有してしまうため)、
   各端末の初回起動時に trixie 標準の `sshd-keygen.service` が生成する
 
+## 再現可能ビルド(依存の固定と更新)
+
+ビルド時の外部依存(Debian snapshot、kernel tarball、k3s、Radxa deb、
+ビルド環境コンテナ)は [dependencies.lock.yaml](dependencies.lock.yaml) で固定され、
+更新は Renovate と週次の snapshot 更新 PR で管理される。
+設計・更新手順・障害時の復旧は [docs/reproducible-build.md](docs/reproducible-build.md) を参照。
+
 ## 設計上の前提と注意
 
 - **カーネル**: mainline 7.3 以降を想定(E54C の DTS 上流化と、DSA スイッチが必要とする

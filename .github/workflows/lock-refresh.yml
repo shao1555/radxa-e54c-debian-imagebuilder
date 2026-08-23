@@ -1,0 +1,47 @@
+name: Refresh lock hashes
+# Renovate は dependencies.lock.yaml の version しか更新できないため、
+# lock を変更する PR で url / sha256 を version から再導出して追随させる。
+# GITHUB_TOKEN によるコミットは workflow を再トリガーしないため、
+# 修正をプッシュした場合は release workflow を明示的に dispatch して再検証する
+on:
+  pull_request:
+    paths:
+      - dependencies.lock.yaml
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  refresh:
+    # fork からの PR にはトークンで push できないためスキップする
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Refresh lock (url / sha256 を version に追随)
+        run: |
+          python3 -c "import yaml" 2> /dev/null || pip install --quiet PyYAML
+          python3 scripts/refresh-lock.py
+          python3 scripts/lock-get.py kernel.sha256 > /dev/null  # 整合検証
+
+      - name: Commit and re-dispatch validation if changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet; then
+            echo "lock は整合済み"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dependencies.lock.yaml
+          git commit -m "lock: url / sha256 を version に追随 (refresh-lock.py)"
+          git push
+          # GITHUB_TOKEN の push は pull_request 系 workflow を再トリガーしない
+          # ため、フルビルド検証を明示的に起動する (release job は
+          # event_name == push ガードで発火しない)
+          gh workflow run release.yml --ref "${{ github.head_ref }}"

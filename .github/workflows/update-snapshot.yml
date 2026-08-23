@@ -1,0 +1,57 @@
+name: Update Debian snapshot
+# Debian snapshot タイムスタンプの週次更新 PR。security update はこの PR の
+# マージによって取り込まれる (rootfs のパッケージ解決は snapshot 固定のため)。
+# PR の CI (release workflow) がフルビルド + smoke + boot-test + 再現性検証を行い、
+# rootfs manifest の差分は job summary でレビューできる。自動マージはしない
+on:
+  schedule:
+    - cron: "0 21 * * 0" # 月曜 06:00 JST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Update snapshot timestamps (lock + Dockerfile)
+        id: update
+        run: |
+          before="$(git rev-parse HEAD)"
+          python3 scripts/update-snapshot.py
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create pull request
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          snap="$(sed -nE 's/^  snapshot: "(.*)"/\1/p' dependencies.lock.yaml)"
+          branch="chore/debian-snapshot-${snap}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add dependencies.lock.yaml .devcontainer/Dockerfile
+          git commit -m "deps: Debian snapshot を ${snap} に更新"
+          git push -u origin "$branch"
+          gh pr create --title "deps: Debian snapshot を ${snap} に更新" --body "$(cat << EOF
+          週次の Debian snapshot 更新です (security update の取り込み)。
+
+          - dependencies.lock.yaml と .devcontainer/Dockerfile の snapshot を同時更新
+          - CI がフルビルド (devcontainer 再構築 → kernel → rootfs → image → boot-test)
+            と再現性検証 (rootfs 二重ビルドの manifest 一致) を行います
+          - rootfs パッケージの差分は rootfs job の summary を参照してください
+          EOF
+          )"
+          # GITHUB_TOKEN による push / PR 作成は workflow を自動トリガーしない
+          # ため、検証を明示的に起動する
+          gh workflow run release.yml --ref "$branch"

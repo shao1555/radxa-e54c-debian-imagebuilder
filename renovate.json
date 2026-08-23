@@ -1,0 +1,30 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "labels": ["dependencies"],
+  "timezone": "Asia/Tokyo",
+  "automerge": false,
+  "packageRules": [
+    {
+      "description": "GitHub Actions はコミット SHA 固定を維持する",
+      "matchManagers": ["github-actions"],
+      "pinDigests": true
+    },
+    {
+      "description": "kernel は minor/patch のみ自動 PR (major は手動判断)",
+      "matchDepNames": ["torvalds/linux"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "dependencies.lock.yaml の version を renovate アノテーションで管理する。url/sha256 は lock-refresh workflow が同一 PR 内で追随更新する",
+      "managerFilePatterns": ["/(^|/)dependencies\\.lock\\.yaml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>[^\\s]+)( extractVersion=(?<extractVersion>[^\\n]+?))?\\s*\\n\\s*version: \"(?<currentValue>[^\"]+)\""
+      ]
+    }
+  ]
+}
