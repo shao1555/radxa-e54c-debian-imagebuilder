@@ -24,8 +24,11 @@ run_one "core" "$dir/core.sh" ""
 for d in "$dir"/modules/*/; do
 	[ -d "$d" ] || continue
 	mid="$(basename "$d")"
-	for t in "$d"*.sh; do
-		[ -e "$t" ] || continue
+	# モジュールディレクトリには宣言されたテストだけがコピーされるため、
+	# 拡張子で絞らず全通常ファイルを実行する (resolver は shebang を尊重する
+	# 任意の実行ファイルを許可しており、*.sh 限定だと黙って実行漏れになる)
+	for t in "$d"*; do
+		[ -f "$t" ] || continue
 		run_one "module[$mid]" "$t" "$mid"
 	done
 done
