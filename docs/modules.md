@@ -149,9 +149,9 @@ module 固有の secret 定義は framework コードにハードコードされ
   cache key に含めない
 - builder は値を 0600 の一時ファイル (ファイル名 = `fileEnvironment` 名。
   module namespace 込みで衝突しない) に置き、そのパスを `fileEnvironment`
-  変数で hook から読めるようにする。全 secret を materialize してから参照元の
-  環境変数を一括で unset するため、複数 secret が同じ source を共有できるし、
-  値そのものはどのプロセスの環境にも現れない
+  変数で hook から読めるようにする。全secretをmaterializeしてから参照元の
+  環境変数を一括でunsetするため、複数secretが同じsourceを共有できる。
+  materialize後に起動するbdebstrapおよびmodule hookにはraw値を継承しない。
 - framework は secret を **opaque なバイト列**として扱い、「参照元が未設定」
   以外の検証はしない。形式検証 (空・改行の拒否など) は用途を知る consumer の
   hook が行う (例: default-user は chpasswd の行区切り仕様のため空と CR/LF を

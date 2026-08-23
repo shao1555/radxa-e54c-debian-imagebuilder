@@ -12,8 +12,7 @@
 #       ファイル名) に 0600 で materialize し、fileEnvironment 変数に
 #       そのパスを export する
 #   (2) 全 materialize 後に参照元の環境変数を一括 unset する
-#       (同じ source を複数 secret が共有できるし、値はどのプロセスの環境にも
-#        残らない)
+#       (materialize 後に起動する子プロセスへ raw 値を継承しない)
 # 呼び出し後、$secret_env_vars に export した fileEnvironment 変数名の
 # カンマ区切りが入る (sudo --preserve-env 用)。
 materialize_secrets() {
