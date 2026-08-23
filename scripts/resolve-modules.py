@@ -1,36 +1,59 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""modules/*/module.yaml を辞書順に探索・検証して解決結果を出力する (Issue #7 MVP)。
+"""canonical ModulePlan resolver (Issue #14)。
 
-- 全組み込みモジュールを自動的に有効化する (profile / enable 条件は未実装)
-- 検証はすべて build 開始前の fail-fast:
-    * apiVersion / kind / metadata.id (ディレクトリ名と一致、重複禁止)
-    * lifecycle phase: 対応 phase 以外は「予約 (未対応)」も含めて明示的に失敗
-    * overlays: MVP では target "/" 固定。source はモジュール内のディレクトリ
-    * hooks / tests: モジュール内の通常ファイル (symlink 不可) + 実行ビット必須
-    * overlay 競合: core files/ と全モジュール overlay の間で、同一の
-      非ディレクトリパスへの配置を拒否 (ディレクトリの共有は許可)
-- 出力: JSON (--json、render-bdebstrap.py 等が消費) または
-  resolved-modules.yaml (--resolved <path>、provenance 用)
+あるビルドで「何を・どの順序で・どの入力から実行するか」を一度だけ解決し、
+out/meta/module-plan.json として build / test / Release 全体で共有する。
+consumer は modules/ を再探索せず、plan に記録された入力だけを利用し、
+利用直前に containment / type / mode / digest を再検証する
+(「Resolver が生成した plan だから安全」とは仮定しない)。
+
+Resolution Pipeline (将来 profile / configuration / dependencies を差し込める順序):
+  1. BuildRequest を読み込む (現在は config.yaml からの暗黙値)
+  2. module source を発見する
+  3. manifest の構造 (JSON Schema)・identity を検証する
+  4. module を選択する (現在: all-builtin)
+  5. configuration を解決する (現在: 空)
+  6. dependencies / capabilities / conflicts を解決する (現在: 空)
+  7. 選択済み module の filesystem input を検証する
+  8. overlay 競合など cross-module 制約を検証する
+  9. 決定的な実行順を求める (現在: module ID の辞書順)
+  10. content digest を計算する (artifact / tests / plan の 3 種)
+  11. ModulePlan を atomic write する
+
+determinism: 同じ入力から byte-identical な plan を生成する。plan には
+absolute path / timestamp / hostname / PID / 一時パス / secret 値を含めない。
 """
 import argparse
+import hashlib
 import json
+import os
+import stat
 import sys
-from pathlib import Path
+import tempfile
+from pathlib import Path, PurePosixPath
 
+import jsonschema
 import yaml
 
-TOP = Path(__file__).resolve().parent.parent
-MODULES_DIR = TOP / "modules"
-
+DEFAULT_WORKSPACE = Path(__file__).resolve().parent.parent
 API_VERSION = "e54c.image/v1alpha1"
-KIND = "Module"
 
-# MVP で実行可能な phase と、スキーマ予約のみ (指定されたら明示的に失敗) の phase
-SUPPORTED_HOOK_PHASES = {"rootfs.customize", "rootfs.seal"}
-RESERVED_HOOK_PHASES = {"image.finalize", "runtime.firstBoot"}
-SUPPORTED_TEST_PHASES = {"rootfs", "boot"}
-RESERVED_TEST_PHASES = {"hardware"}
+SUPPORTED_HOOK_PHASES = ("rootfs.customize", "rootfs.seal")
+RESERVED_HOOK_PHASES = ("image.finalize", "runtime.firstBoot")
+SUPPORTED_TEST_PHASES = ("rootfs", "boot")
+RESERVED_TEST_PHASES = ("hardware",)
+
+# 組み込み module への secret input の集中定義 (docs/modules.md の限定契約)。
+# module ID の特別扱いをここ 1 箇所に集約する。後続の configuration Issue で
+# module manifest からの宣言へ移行する
+BUILTIN_SECRETS = {
+    "default-user": [{"name": "DEFAULT_PASSWORD", "source": "environment"}],
+}
+
+
+class ResolveError(Exception):
+    pass
 
 
 def die(msg):
@@ -38,178 +61,553 @@ def die(msg):
     sys.exit(1)
 
 
-def check_module_file(mod_dir, rel, what):
-    """モジュール内の実行ファイル参照を検証し、絶対パスを返す"""
-    if Path(rel).is_absolute() or ".." in Path(rel).parts:
-        die(f"{mod_dir.name}: {what} '{rel}' は相対パスでモジュール内を指すこと")
-    p = mod_dir / rel
-    # symlink による脱出を防ぐため、実体解決後もモジュール内に収まることを要求する
-    if p.is_symlink():
-        die(f"{mod_dir.name}: {what} '{rel}' が symlink (禁止)")
-    if not p.is_file():
-        die(f"{mod_dir.name}: {what} '{rel}' が通常ファイルとして存在しない")
-    if not p.resolve().is_relative_to(mod_dir.resolve()):
-        die(f"{mod_dir.name}: {what} '{rel}' がモジュール外を指している")
-    import os
-
-    if not os.access(p, os.X_OK):
-        die(f"{mod_dir.name}: {what} '{rel}' に実行ビットが無い (chmod +x すること)")
-    return p
+def info(msg):
+    print(f"resolve-modules: {msg}", file=sys.stderr)
 
 
-def overlay_entries(root):
-    """overlay ツリー内の全エントリを (相対パス → 種別) で返す。symlink 脱出も検証"""
-    entries = {}
-    for p in sorted(root.rglob("*")):
-        rel = p.relative_to(root)
-        if p.is_symlink():
-            # symlink 自体の配置は許可するが、モジュール/ツリー外への解決は拒否しない
-            # (rootfs 内で解決されるリンクであり、ビルダー上の実体参照ではないため)。
-            # ただし競合検出上は非ディレクトリとして扱う
-            entries[str(rel)] = "file"
-        elif p.is_dir():
-            entries[str(rel)] = "dir"
+# --- 共通 helper -------------------------------------------------------------
+
+def sha256_bytes(data):
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def canonical_digest(obj):
+    """digest 計算用の canonical serialize (key sort・固定 separator・UTF-8)"""
+    data = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return sha256_bytes(data.encode("utf-8"))
+
+
+def mode_str(st_mode):
+    return format(stat.S_IMODE(st_mode), "04o")
+
+
+def check_rel_string(rel, what):
+    """path 文字列そのものの検証 (実体は見ない)"""
+    if not rel or "\x00" in rel or "\r" in rel or "\n" in rel:
+        raise ResolveError(f"{what}: path に NUL/CR/LF を含む、または空")
+    p = PurePosixPath(rel)
+    if p.is_absolute():
+        raise ResolveError(f"{what}: absolute path は不可: {rel}")
+    if any(part in (".", "..") for part in p.parts):
+        raise ResolveError(f"{what}: '.' / '..' component は不可: {rel}")
+
+
+def check_no_symlink_components(root, rel, what):
+    """root から rel までの各 component を lstat し、symlink が無いことを確認"""
+    cur = root
+    for part in PurePosixPath(rel).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            raise ResolveError(f"{what}: 経路に symlink を含む: {cur}")
+
+
+def check_containment(root, rel, what):
+    """実体解決後の containment (文字列 prefix に依存しない)"""
+    root_r = root.resolve(strict=True)
+    try:
+        candidate = (root / rel).resolve(strict=True)
+    except OSError as e:
+        raise ResolveError(f"{what}: 実体を解決できない: {rel} ({e})") from e
+    if not candidate.is_relative_to(root_r):
+        raise ResolveError(f"{what}: module root の外を指している: {rel}")
+    return candidate
+
+
+def load_schema(workspace, name):
+    # schema は常にこのリポジトリ (実装と同梱) のものを使う
+    schema_dir = Path(__file__).resolve().parent.parent / "schemas"
+    return json.loads((schema_dir / name).read_text())
+
+
+def schema_validate(instance, schema, what):
+    validator = jsonschema.Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(instance), key=lambda e: list(e.path))
+    if errors:
+        e = errors[0]
+        loc = "/".join(str(p) for p in e.path) or "(root)"
+        raise ResolveError(f"{what}: schema 違反 at {loc}: {e.message}")
+
+
+# --- Resolution Pipeline -----------------------------------------------------
+
+def load_build_request(workspace):
+    """1. BuildRequest (現在は config.yaml からの暗黙値)"""
+    cfg = yaml.safe_load((workspace / "config.yaml").read_text())
+    target = cfg.get("target") or {}
+    board = target.get("board")
+    arch = target.get("architecture")
+    suite = (cfg.get("debian") or {}).get("suite")
+    if not board or not arch or not suite:
+        raise ResolveError(
+            "config.yaml に target.board / target.architecture / debian.suite が必要"
+        )
+    return {
+        "target": {"board": board, "architecture": arch, "suite": suite},
+        "selection": {"mode": "all-builtin"},
+        "configuration": {},
+        "secretReferences": {},
+    }
+
+
+def discover_modules(workspace):
+    """2. module source の発見"""
+    modules_dir = workspace / "modules"
+    if not modules_dir.is_dir():
+        return []
+    dirs = []
+    for d in sorted(modules_dir.iterdir()):
+        if d.is_symlink():
+            raise ResolveError(f"{d.name}: モジュールディレクトリが symlink (禁止)")
+        if d.is_dir():
+            dirs.append(d)
+    return dirs
+
+
+def load_manifest(workspace, mod_dir, module_schema):
+    """3. manifest の構造・identity 検証"""
+    yml = mod_dir / "module.yaml"
+    if yml.is_symlink() or not yml.is_file():
+        raise ResolveError(f"{mod_dir.name}: module.yaml が通常ファイルとして存在しない")
+    try:
+        spec = yaml.safe_load(yml.read_text())
+    except yaml.YAMLError as e:
+        raise ResolveError(f"{mod_dir.name}/module.yaml: YAML が不正: {e}") from e
+    schema_validate(spec, module_schema, f"{mod_dir.name}/module.yaml")
+    mid = spec["metadata"]["id"]
+    if mid != mod_dir.name:
+        raise ResolveError(
+            f"{mod_dir.name}: metadata.id ({mid!r}) がディレクトリ名と一致しない"
+        )
+    # 予約 phase は schema 上は書けるが、内容があれば「未対応」として明示的に失敗
+    for phase in RESERVED_HOOK_PHASES:
+        if (spec.get("hooks") or {}).get(phase):
+            raise ResolveError(f"{mid}: hook phase '{phase}' はスキーマ予約のみで未対応")
+    for phase in RESERVED_TEST_PHASES:
+        if (spec.get("tests") or {}).get(phase):
+            raise ResolveError(f"{mid}: test phase '{phase}' はスキーマ予約のみで未対応")
+    return spec
+
+
+def file_ref(workspace, mod_dir, rel, what, *, executable):
+    """7. hook / test の filesystem input 検証 → fileRef"""
+    check_rel_string(rel, what)
+    check_no_symlink_components(mod_dir, rel, what)
+    p = check_containment(mod_dir, rel, what)
+    st = os.lstat(p)
+    if not stat.S_ISREG(st.st_mode):
+        raise ResolveError(f"{what}: 通常ファイルでない: {rel}")
+    if executable and not os.access(p, os.X_OK):
+        raise ResolveError(f"{what}: 実行ビットが無い (chmod +x): {rel}")
+    return {
+        "path": str(PurePosixPath(p.relative_to(workspace).as_posix())),
+        "mode": mode_str(st.st_mode),
+        "sha256": sha256_file(p),
+    }
+
+
+def overlay_entries(workspace, src_dir, what):
+    """overlay ツリーの走査。symlink は追跡しない (lstat / target 文字列のみ)"""
+    entries = []
+    for p in sorted(src_dir.rglob("*")):
+        rel = str(p.relative_to(src_dir).as_posix())
+        st = os.lstat(p)
+        if stat.S_ISLNK(st.st_mode):
+            entries.append(
+                {"path": rel, "type": "symlink", "linkTarget": os.readlink(p)}
+            )
+        elif stat.S_ISDIR(st.st_mode):
+            entries.append({"path": rel, "type": "dir", "mode": mode_str(st.st_mode)})
+        elif stat.S_ISREG(st.st_mode):
+            entries.append(
+                {
+                    "path": rel,
+                    "type": "file",
+                    "mode": mode_str(st.st_mode),
+                    "sha256": sha256_file(p),
+                }
+            )
         else:
-            entries[str(rel)] = "file"
+            raise ResolveError(f"{what}: 未対応のファイル種別: {rel}")
     return entries
 
 
-def resolve():
-    modules = []
-    seen_ids = set()
-    if MODULES_DIR.is_dir():
-        mod_dirs = sorted(d for d in MODULES_DIR.iterdir() if d.is_dir())
-    else:
-        mod_dirs = []
-    for mod_dir in mod_dirs:
-        if mod_dir.is_symlink():
-            die(f"{mod_dir.name}: モジュールディレクトリが symlink (禁止)")
-        yml = mod_dir / "module.yaml"
-        if not yml.is_file():
-            die(f"{mod_dir.name}: module.yaml が無い")
-        try:
-            spec = yaml.safe_load(yml.read_text())
-        except yaml.YAMLError as e:
-            die(f"{mod_dir.name}/module.yaml: YAML が不正: {e}")
-        if not isinstance(spec, dict):
-            die(f"{mod_dir.name}/module.yaml: dict でない")
-        if spec.get("apiVersion") != API_VERSION:
-            die(f"{mod_dir.name}: apiVersion が不正 (期待: {API_VERSION})")
-        if spec.get("kind") != KIND:
-            die(f"{mod_dir.name}: kind が不正 (期待: {KIND})")
-        mid = (spec.get("metadata") or {}).get("id")
-        if mid != mod_dir.name:
-            die(f"{mod_dir.name}: metadata.id ({mid!r}) がディレクトリ名と一致しない")
-        if mid in seen_ids:
-            die(f"module ID が重複: {mid}")
-        seen_ids.add(mid)
+def resolve_module(workspace, mod_dir, spec):
+    mid = spec["metadata"]["id"]
+    mod_root_rel = str(mod_dir.relative_to(workspace).as_posix())
 
-        # --- packages ---
-        pkgs = (spec.get("packages") or {}).get("apt") or []
-        if not isinstance(pkgs, list) or not all(isinstance(p, str) and p for p in pkgs):
-            die(f"{mid}: packages.apt は文字列のリストであること")
+    manifest_path = mod_dir / "module.yaml"
+    manifest = {
+        "path": f"{mod_root_rel}/module.yaml",
+        "sha256": sha256_file(manifest_path),
+    }
 
-        # --- overlays (MVP: target は "/" 固定) ---
-        overlays = []
-        for ov in spec.get("overlays") or []:
-            src = ov.get("source")
-            target = ov.get("target", "/")
-            if target != "/":
-                die(f"{mid}: overlays.target は MVP では '/' のみ対応 (指定: {target!r})")
-            if not src or Path(src).is_absolute() or ".." in Path(src).parts:
-                die(f"{mid}: overlays.source '{src}' は相対パスでモジュール内を指すこと")
-            src_dir = mod_dir / src
-            if src_dir.is_symlink() or not src_dir.is_dir():
-                die(f"{mid}: overlays.source '{src}' がディレクトリとして存在しない")
-            # 中間コンポーネントの symlink による脱出も拒否する
-            # (src_dir 自体が symlink でなくても、親が module 外を指し得る)
-            if not src_dir.resolve().is_relative_to(mod_dir.resolve()):
-                die(f"{mid}: overlays.source '{src}' がモジュール外を指している")
-            overlays.append(str(src_dir))
-
-        # --- hooks ---
-        hooks = {}
-        for phase, scripts in (spec.get("hooks") or {}).items():
-            if phase in RESERVED_HOOK_PHASES:
-                die(f"{mid}: hook phase '{phase}' はスキーマ予約のみで未対応")
-            if phase not in SUPPORTED_HOOK_PHASES:
-                die(f"{mid}: 未知の hook phase '{phase}'")
-            if not isinstance(scripts, list):
-                die(f"{mid}: hooks.{phase} はリストであること")
-            hooks[phase] = [
-                str(check_module_file(mod_dir, s, f"hooks.{phase}")) for s in scripts
-            ]
-
-        # --- tests ---
-        tests = {}
-        for phase, scripts in (spec.get("tests") or {}).items():
-            if phase in RESERVED_TEST_PHASES:
-                die(f"{mid}: test phase '{phase}' はスキーマ予約のみで未対応")
-            if phase not in SUPPORTED_TEST_PHASES:
-                die(f"{mid}: 未知の test phase '{phase}'")
-            if not isinstance(scripts, list):
-                die(f"{mid}: tests.{phase} はリストであること")
-            tests[phase] = [
-                str(check_module_file(mod_dir, s, f"tests.{phase}")) for s in scripts
-            ]
-
-        modules.append(
+    overlays = []
+    for ov in spec.get("overlays") or []:
+        src = ov["source"]
+        target = ov.get("target", "/")
+        if target != "/":
+            raise ResolveError(f"{mid}: overlays.target は MVP では '/' のみ (指定: {target!r})")
+        check_rel_string(src, f"{mid}: overlays.source")
+        src_dir = mod_dir / src
+        if src_dir.is_symlink() or not src_dir.is_dir():
+            raise ResolveError(f"{mid}: overlays.source '{src}' がディレクトリとして存在しない")
+        check_containment(mod_dir, src, f"{mid}: overlays.source")
+        overlays.append(
             {
-                "id": mid,
-                "path": str(mod_dir.relative_to(TOP)),
-                "packages": pkgs,
-                "overlays": overlays,
-                "hooks": hooks,
-                "tests": tests,
+                "source": f"{mod_root_rel}/{src}",
+                "target": "/",
+                "entries": overlay_entries(workspace, src_dir, f"{mid}: overlay"),
             }
         )
 
-    # --- overlay 競合検出 (core files/ + 全モジュール) ---
+    hooks = {}
+    for phase in SUPPORTED_HOOK_PHASES:
+        refs = [
+            file_ref(workspace, mod_dir, s, f"{mid}: hooks.{phase}", executable=True)
+            for s in (spec.get("hooks") or {}).get(phase) or []
+        ]
+        if refs:
+            hooks[phase] = refs
+    tests = {}
+    for phase in SUPPORTED_TEST_PHASES:
+        refs = [
+            file_ref(workspace, mod_dir, s, f"{mid}: tests.{phase}", executable=True)
+            for s in (spec.get("tests") or {}).get(phase) or []
+        ]
+        if refs:
+            tests[phase] = refs
+
+    return {
+        "id": mid,
+        "source": {"type": "builtin", "root": mod_root_rel},
+        "manifest": manifest,
+        "packages": {"apt": list((spec.get("packages") or {}).get("apt") or [])},
+        "overlays": overlays,
+        "hooks": hooks,
+        "tests": tests,
+        "config": {},
+        "resolvedDependencies": [],
+    }
+
+
+def check_overlay_conflicts(workspace, modules):
+    """8. cross-module 制約: 同一の非ディレクトリパスへの配置を拒否"""
+    placed = {}  # rootfs 内パス → (owner, type)
     trees = []
-    core_files = TOP / "files"
+    core_files = workspace / "files"
     if core_files.is_dir():
-        trees.append(("core", core_files))
+        trees.append(("core", overlay_entries(workspace, core_files, "core: files")))
     for m in modules:
         for ov in m["overlays"]:
-            trees.append((f"module[{m['id']}]", Path(ov)))
-    placed = {}  # 相対パス → (owner, 種別)
-    for owner, root in trees:
-        for rel, kind in overlay_entries(root).items():
-            if rel in placed:
-                prev_owner, prev_kind = placed[rel]
-                if prev_kind == "dir" and kind == "dir":
-                    continue  # ディレクトリの共有は許可
-                die(
-                    f"overlay 競合: /{rel} を {prev_owner} と {owner} の両方が配置している"
+            trees.append((f"module[{m['id']}]", ov["entries"]))
+    for owner, entries in trees:
+        for e in entries:
+            key = e["path"]
+            if key in placed:
+                prev_owner, prev_type = placed[key]
+                if prev_type == "dir" and e["type"] == "dir":
+                    continue
+                raise ResolveError(
+                    f"overlay 競合: /{key} を {prev_owner} と {owner} の両方が配置している"
                 )
-            placed[rel] = (owner, kind)
+            placed[key] = (owner, e["type"])
 
-    return modules
 
+def compute_digests(plan):
+    """10. artifact / tests / plan の 3 種の digest"""
+    artifact_input = {
+        "target": plan["target"],
+        "configuration": {},
+        "modules": [
+            {
+                "id": m["id"],
+                "packages": m["packages"],
+                "overlays": m["overlays"],
+                "hooks": m["hooks"],
+                "config": m["config"],
+            }
+            for m in plan["modules"]
+        ],
+    }
+    tests_input = [
+        {"module": m["id"], "phase": phase, **ref}
+        for m in plan["modules"]
+        for phase in SUPPORTED_TEST_PHASES
+        for ref in m["tests"].get(phase, [])
+    ]
+    plan["digests"] = {
+        "artifact": canonical_digest(artifact_input),
+        "tests": canonical_digest(tests_input),
+        "plan": "",
+    }
+    without_plan = json.loads(json.dumps(plan))
+    del without_plan["digests"]["plan"]
+    plan["digests"]["plan"] = canonical_digest(without_plan)
+    return plan
+
+
+def resolve(workspace):
+    request = load_build_request(workspace)
+    module_schema = load_schema(workspace, "module.schema.json")
+    mod_dirs = discover_modules(workspace)
+
+    modules = []
+    seen = set()
+    for mod_dir in mod_dirs:  # 9. 実行順 = 辞書順 (discover が sorted 済み)
+        spec = load_manifest(workspace, mod_dir, module_schema)
+        mid = spec["metadata"]["id"]
+        if mid in seen:
+            raise ResolveError(f"module ID が重複: {mid}")
+        seen.add(mid)
+        modules.append(resolve_module(workspace, mod_dir, spec))
+
+    check_overlay_conflicts(workspace, modules)
+
+    required_secrets = [
+        {"name": s["name"], "consumer": m["id"], "source": s["source"]}
+        for m in modules
+        for s in BUILTIN_SECRETS.get(m["id"], [])
+    ]
+
+    plan = {
+        "apiVersion": API_VERSION,
+        "kind": "ModulePlan",
+        "target": request["target"],
+        "selection": {"mode": "all-builtin", "profile": None},
+        "modules": modules,
+        "requiredSecrets": required_secrets,
+        "digests": {},
+    }
+    compute_digests(plan)
+    schema_validate(plan, load_schema(workspace, "module-plan.schema.json"), "ModulePlan")
+    return plan
+
+
+def write_plan_atomic(plan, output):
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(plan, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+    fd, tmp = tempfile.mkstemp(dir=output.parent, prefix=".module-plan.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+        os.replace(tmp, output)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+# --- consumer 側の検証 API ---------------------------------------------------
+
+def load_plan(workspace, plan_path):
+    plan = json.loads(Path(plan_path).read_text())
+    schema_validate(plan, load_schema(workspace, "module-plan.schema.json"), "ModulePlan")
+    # digests.plan の自己整合 (plan 自体の改ざん検出)
+    without_plan = json.loads(json.dumps(plan))
+    del without_plan["digests"]["plan"]
+    if canonical_digest(without_plan) != plan["digests"]["plan"]:
+        raise ResolveError("plan の digests.plan が本体と一致しない (改ざんまたは破損)")
+    return plan
+
+
+def verify_ref(workspace, module, ref, what):
+    """plan に記録された fileRef を実行直前に再検証する。
+    workspace 内に収まるだけでは不十分: 当該 module root 内であることを要求する
+    (改ざん plan が core script や他 module を指すのを拒否)"""
+    rel = ref["path"]
+    check_rel_string(rel, what)
+    mod_root = workspace / module["source"]["root"]
+    try:
+        mod_root_r = mod_root.resolve(strict=True)
+        candidate = (workspace / rel).resolve(strict=True)
+    except OSError as e:
+        raise ResolveError(f"{what}: 実体を解決できない: {rel} ({e})") from e
+    if not candidate.is_relative_to(mod_root_r):
+        raise ResolveError(f"{what}: 当該 module root の外を指している: {rel}")
+    check_no_symlink_components(workspace, rel, what)
+    st = os.lstat(workspace / rel)
+    if not stat.S_ISREG(st.st_mode):
+        raise ResolveError(f"{what}: 通常ファイルでない: {rel}")
+    problems = []
+    if "mode" in ref and mode_str(st.st_mode) != ref["mode"]:
+        problems.append(f"mode expected {ref['mode']} actual {mode_str(st.st_mode)}")
+    actual = sha256_file(workspace / rel)
+    if actual != ref["sha256"]:
+        problems.append(f"expected {ref['sha256']}\n  actual   {actual}")
+    if problems:
+        raise ResolveError(
+            "module plan is stale:\n  " + rel + "\n  " + "\n  ".join(problems)
+            + "\n\nrun: make resolve"
+        )
+
+
+def verify_inputs(workspace, plan, phase):
+    """phase: hooks | tests.rootfs | tests.boot | all"""
+    for m in plan["modules"]:
+        if phase in ("hooks", "all"):
+            verify_ref(workspace, m, m["manifest"], f"module[{m['id']}] manifest")
+            for ph, refs in m["hooks"].items():
+                for ref in refs:
+                    verify_ref(workspace, m, ref, f"module[{m['id']}] hooks.{ph}")
+            for ov in m["overlays"]:
+                src = workspace / ov["source"]
+                if src.is_symlink() or not src.is_dir():
+                    raise ResolveError(
+                        f"module[{m['id']}] overlay source が不正: {ov['source']}"
+                    )
+                actual = overlay_entries(workspace, src, f"module[{m['id']}] overlay")
+                if actual != ov["entries"]:
+                    raise ResolveError(
+                        f"module plan is stale:\n  {ov['source']} (overlay 内容が変化)"
+                        "\n\nrun: make resolve"
+                    )
+        for tp in SUPPORTED_TEST_PHASES:
+            if phase in (f"tests.{tp}", "all"):
+                for ref in m["tests"].get(tp, []):
+                    verify_ref(workspace, m, ref, f"module[{m['id']}] tests.{tp}")
+
+
+# --- sidecar ------------------------------------------------------------------
+
+def write_sidecar(plan, rootfs_tar, output):
+    sidecar = {
+        "moduleArtifactDigest": plan["digests"]["artifact"],
+        "builtWithPlanDigest": plan["digests"]["plan"],
+        "rootfsTarSha256": sha256_file(rootfs_tar),
+    }
+    Path(output).write_text(json.dumps(sidecar, sort_keys=True, indent=2) + "\n")
+
+
+def verify_sidecar(plan, rootfs_tar, sidecar_path):
+    sidecar = json.loads(Path(sidecar_path).read_text())
+    if sidecar.get("moduleArtifactDigest") != plan["digests"]["artifact"]:
+        raise ResolveError(
+            "rootfs.tar は現在の plan と異なる module 入力から作られている:\n"
+            f"  plan    {plan['digests']['artifact']}\n"
+            f"  sidecar {sidecar.get('moduleArtifactDigest')}\n\n"
+            "rootfs を再構築すること (make rootfs)"
+        )
+    actual = sha256_file(rootfs_tar)
+    if sidecar.get("rootfsTarSha256") != actual:
+        raise ResolveError(
+            "rootfs.tar が sidecar の記録と一致しない (改ざんまたは破損):\n"
+            f"  sidecar {sidecar.get('rootfsTarSha256')}\n  actual  {actual}"
+        )
+    # builtWithPlanDigest は provenance 情報であり、再構築条件にしない
+    # (test や description のみの変更で plan digest は変わるが rootfs は再利用できる)
+
+
+# --- CLI ----------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--json", action="store_true", help="解決結果を JSON で stdout に出力")
-    ap.add_argument("--resolved", metavar="PATH", help="resolved-modules.yaml を書き出す")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE,
+                    help="リポジトリルート (fixture テスト用の差し替え)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("resolve", help="ModulePlan を生成する")
+    p.add_argument("--output", required=True)
+
+    sub.add_parser("validate", help="解決のみ実行し plan を書き出さない")
+
+    p = sub.add_parser("explain", help="plan の要約を人間向けに表示する")
+    p.add_argument("--plan", required=True)
+
+    p = sub.add_parser("verify-inputs", help="plan 記載の入力を再検証する")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--phase", default="all",
+                   choices=["hooks", "tests.rootfs", "tests.boot", "all"])
+
+    p = sub.add_parser("list-tests", help="検証してから TSV (id, path) を出力する")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--phase", required=True, choices=["rootfs", "boot"])
+
+    p = sub.add_parser("digest", help="plan の digest を出力する")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--kind", default="artifact", choices=["artifact", "tests", "plan"])
+
+    p = sub.add_parser("required-secrets", help="TSV (name, consumer, source) を出力する")
+    p.add_argument("--plan", required=True)
+
+    p = sub.add_parser("write-sidecar", help="rootfs sidecar を生成する")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--rootfs", required=True)
+    p.add_argument("--output", required=True)
+
+    p = sub.add_parser("verify-sidecar", help="plan と sidecar / rootfs.tar を照合する")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--rootfs", required=True)
+    p.add_argument("--sidecar", required=True)
+
+    p = sub.add_parser("export-resolved", help="plan から resolved-modules.yaml を導出する")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--output", required=True)
+
     args = ap.parse_args()
+    workspace = args.workspace.resolve()
 
-    modules = resolve()
-    order = ", ".join(m["id"] for m in modules) or "(なし)"
-    print(f"resolve-modules: {len(modules)} 個のモジュールを解決 (実行順: {order})",
-          file=sys.stderr)
+    try:
+        if args.cmd in ("resolve", "validate"):
+            plan = resolve(workspace)
+            order = ", ".join(m["id"] for m in plan["modules"]) or "(なし)"
+            info(f"{len(plan['modules'])} 個のモジュールを解決 (実行順: {order})")
+            if args.cmd == "resolve":
+                write_plan_atomic(plan, args.output)
+                info(f"plan を書き出した: {args.output}")
+            return
 
-    if args.json:
-        json.dump(modules, sys.stdout, ensure_ascii=False, indent=1)
-        print()
-    if args.resolved:
-        out = {
-            "apiVersion": API_VERSION,
-            "modules": [
-                {"id": m["id"], "source": "builtin", "path": m["path"]} for m in modules
-            ],
-        }
-        Path(args.resolved).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.resolved).write_text(yaml.safe_dump(out, sort_keys=False, allow_unicode=True))
+        plan = load_plan(workspace, args.plan)
+        if args.cmd == "explain":
+            print(f"target: {plan['target']['board']} ({plan['target']['architecture']}, "
+                  f"{plan['target']['suite']})")
+            print(f"selection: {plan['selection']['mode']}")
+            for m in plan["modules"]:
+                n_hooks = sum(len(v) for v in m["hooks"].values())
+                n_tests = sum(len(v) for v in m["tests"].values())
+                print(f"  {m['id']}: packages={len(m['packages']['apt'])} "
+                      f"overlays={len(m['overlays'])} hooks={n_hooks} tests={n_tests}")
+            for k, v in plan["digests"].items():
+                print(f"digest.{k}: {v}")
+        elif args.cmd == "verify-inputs":
+            verify_inputs(workspace, plan, args.phase)
+            info(f"plan inputs verified (phase: {args.phase})")
+        elif args.cmd == "list-tests":
+            verify_inputs(workspace, plan, f"tests.{args.phase}")
+            for m in plan["modules"]:
+                for ref in m["tests"].get(args.phase, []):
+                    print(f"{m['id']}\t{ref['path']}")
+        elif args.cmd == "digest":
+            print(plan["digests"][args.kind])
+        elif args.cmd == "required-secrets":
+            for s in plan["requiredSecrets"]:
+                print(f"{s['name']}\t{s['consumer']}\t{s['source']}")
+        elif args.cmd == "write-sidecar":
+            write_sidecar(plan, args.rootfs, args.output)
+        elif args.cmd == "verify-sidecar":
+            verify_sidecar(plan, args.rootfs, args.sidecar)
+            info("sidecar verified (artifact digest / rootfs.tar sha256)")
+        elif args.cmd == "export-resolved":
+            out = {
+                "apiVersion": API_VERSION,
+                "modules": [
+                    {"id": m["id"], "source": m["source"]["type"],
+                     "path": m["source"]["root"]}
+                    for m in plan["modules"]
+                ],
+            }
+            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.output).write_text(
+                yaml.safe_dump(out, sort_keys=False, allow_unicode=True))
+    except ResolveError as e:
+        die(str(e))
 
 
 if __name__ == "__main__":

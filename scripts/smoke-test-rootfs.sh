@@ -8,8 +8,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 TOP="$PWD"
+PLAN="out/meta/module-plan.json"
+if [[ "${1:-}" == "--plan" ]]; then
+	PLAN="$2"
+	shift 2
+fi
 TAR="${1:-out/rootfs/build/rootfs.tar}"
 [[ -f $TAR ]] || { echo "NG: rootfs.tar が無い: $TAR" >&2; exit 1; }
+[[ -f $PLAN ]] || { echo "NG: module-plan が無い: $PLAN (make resolve)" >&2; exit 1; }
+
+# rootfs artifact が現在の plan の module 入力から作られたこと (artifact digest)
+# と、tar 実体が sidecar の記録と一致することを検証する。
+# builtWithPlanDigest の不一致は再構築条件にしない (test のみの変更では
+# rootfs を再利用できる)
+python3 scripts/resolve-modules.py verify-sidecar --plan "$PLAN" \
+	--rootfs "$TAR" --sidecar "$(dirname "$TAR")/rootfs.meta.json"
 
 # 共通 helper (check / check_absent / enabled / tar_cat) と、モジュールテストへの
 # 受け渡し (Issue #7 の契約)。listing は一度だけ生成して共有する
@@ -147,21 +160,19 @@ else
 	echo "ok: apt lists に index の残骸が無い"
 fi
 
-# --- モジュールの rootfs test (core 検査の後、辞書順、各テストは独立プロセス) ---
-# モジュールテストは追加のみ可能で、core invariant を無効化できない
-# (fail は集約のみ。resolver の検証失敗もここで fail-fast する)
-module_tests="$(python3 scripts/resolve-modules.py --json | python3 -c "
-import json, sys
-for m in json.load(sys.stdin):
-    for t in m['tests'].get('rootfs', []):
-        print(f\"{m['id']}\t{t}\")")"
+# --- モジュールの rootfs test (core 検査の後、plan の順、各テストは独立プロセス) ---
+# modules/ は再探索しない: plan に記載されたテストだけを実行する。
+# list-tests は出力前に containment / type / mode / digest を再検証し、
+# stale / 改ざん plan なら失敗する。モジュールテストは追加のみ可能で、
+# core invariant を無効化できない (fail は集約のみ)
+module_tests="$(python3 scripts/resolve-modules.py list-tests --plan "$PLAN" --phase rootfs)"
 while IFS=$'\t' read -r mid t; do
 	[[ -n $mid ]] || continue
-	echo "module[$mid] rootfs test: ${t#"$TOP"/}"
-	if E54C_MODULE_ID="$mid" "$t" 2>&1 | sed "s/^/module[$mid] /"; then
+	echo "module[$mid] rootfs test: $t"
+	if E54C_MODULE_ID="$mid" "$TOP/$t" 2>&1 | sed "s/^/module[$mid] /"; then
 		:
 	else
-		echo "NG: module[$mid] の rootfs test が失敗 (${t#"$TOP"/})"
+		echo "NG: module[$mid] の rootfs test が失敗 ($t)"
 		fail=1
 	fi
 done <<< "$module_tests"

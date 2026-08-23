@@ -217,6 +217,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # resolver の fixture テスト → canonical ModulePlan の生成 (この pipeline で
+      # 唯一の resolve。cache hit/miss 両経路とも以後は同じ plan を参照する)
+      - name: Resolver tests and resolve module plan
+        id: plan
+        run: |
+          docker run --rm -v "$PWD":/ws -w /ws \
+            "${{ needs.devcontainer.outputs.image }}" bash -c '
+            python3 scripts/tests/test_resolver.py &&
+            python3 scripts/resolve-modules.py resolve --output out/meta/module-plan.json'
+          echo "artifact-digest=$(docker run --rm -v "$PWD":/ws -w /ws \
+            "${{ needs.devcontainer.outputs.image }}" \
+            python3 scripts/resolve-modules.py digest --plan out/meta/module-plan.json --kind artifact)" \
+            >> "$GITHUB_OUTPUT"
+
       - name: Restore rootfs
         id: rootfs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -224,9 +238,10 @@ jobs:
           path: out/rootfs
           # workflow 自体もキーに含める (DEFAULT_PASSWORD 等、この場で決まる
           # 入力の変更で古い rootfs キャッシュが再利用されるのを防ぐ)。
-          # kernel deb のキー (seed 含む) と devcontainer イメージ識別子も含め、
-          # カーネルやビルド環境が変わったのに旧 rootfs を再利用しないようにする
-          key: rootfs-${{ runner.arch }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ hashFiles('config.yaml', 'packages.txt', 'dependencies.lock.yaml', 'scripts/lock-get.py', 'files/**', 'hooks/**', 'modules/**', 'scripts/build-rootfs.sh', 'scripts/verify-build-env.sh', 'scripts/render-bdebstrap.py', 'scripts/resolve-modules.py', '.github/workflows/release.yml') }}
+          # モジュール起因の再構築判定は plan の artifact digest が担う
+          # (test のみの変更では digest が変わらず rootfs を再利用できる)。
+          # kernel deb のキー (seed 含む) と devcontainer イメージ識別子も含める
+          key: rootfs-${{ runner.arch }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ steps.plan.outputs.artifact-digest }}-${{ hashFiles('config.yaml', 'packages.txt', 'dependencies.lock.yaml', 'scripts/lock-get.py', 'files/**', 'hooks/**', 'schemas/**', 'scripts/build-rootfs.sh', 'scripts/verify-build-env.sh', 'scripts/render-bdebstrap.py', 'scripts/resolve-modules.py', '.github/workflows/release.yml') }}
 
       - name: Download kernel debs
         if: steps.rootfs.outputs.cache-hit != 'true'
@@ -309,13 +324,16 @@ jobs:
           docker run --rm "${{ needs.devcontainer.outputs.image }}" \
             dpkg-query -W -f '${Package}=${Version}\n' > out/meta/build-env-arm64.txt
           docker run --rm -v "$PWD":/ws -w /ws "${{ needs.devcontainer.outputs.image }}" \
-            python3 scripts/resolve-modules.py --resolved out/meta/resolved-modules.yaml
+            python3 scripts/resolve-modules.py export-resolved \
+              --plan out/meta/module-plan.json --output out/meta/resolved-modules.yaml
 
       - name: Upload rootfs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rootfs
-          path: out/rootfs/build/rootfs.tar
+          path: |
+            out/rootfs/build/rootfs.tar
+            out/rootfs/build/rootfs.meta.json
           if-no-files-found: error
 
       - name: Upload rootfs metadata
@@ -327,6 +345,13 @@ jobs:
             out/rootfs/bdebstrap.yaml
             out/meta/build-env-arm64.txt
             out/meta/resolved-modules.yaml
+          if-no-files-found: error
+
+      - name: Upload module plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: module-plan
+          path: out/meta/module-plan.json
           if-no-files-found: error
 
   # ステージ 3: イメージ組み立て (guestfish)。rootfs.tar だけを入力に取る。
@@ -352,6 +377,12 @@ jobs:
         with:
           name: rootfs
           path: out/rootfs/build
+
+      - name: Download module plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: module-plan
+          path: out/meta
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -425,6 +456,12 @@ jobs:
           name: image
           path: out
 
+      - name: Download module plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: module-plan
+          path: out/meta
+
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -477,6 +514,12 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: image-meta
+          path: out/meta
+
+      - name: Download module plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: module-plan
           path: out/meta
 
       - name: Compose provenance

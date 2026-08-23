@@ -12,8 +12,7 @@ mkdir -p "$OUT"
 
 # devcontainer 内は root で動くため sudo を無効化。非 root では sudo の
 # env_reset で DEFAULT_PASSWORD が落ちないよう明示的に保持する
-# 秘匿値そのものではなく、secret ファイルのパスだけを bdebstrap へ伝える
-SUDO="sudo --preserve-env=E54C_DEFAULT_PASSWORD_FILE"
+SUDO="sudo"
 [[ $EUID -eq 0 ]] && SUDO=""
 
 # ローカルビルドの秘匿設定。make 経由の include だと $ や # を含むパスワードが
@@ -56,43 +55,49 @@ echo "kernel deb preflight passed: $(basename "$img_deb")"
 # ビルド環境の snapshot 固定が lock と一致しているか (fail-fast)
 scripts/verify-build-env.sh
 
-# モジュールの解決 (検証込みの fail-fast) と provenance の生成。
-# render-bdebstrap.py も同じ resolver を使って packages / overlay / hook を配線する
+# canonical ModulePlan の生成 (このビルドで唯一の resolve。以後の全 consumer は
+# plan だけを参照する) + 利用直前の入力再検証 (containment / type / mode / digest)
+PLAN="$TOP/out/meta/module-plan.json"
 mkdir -p "$TOP/out/meta"
-resolved_ids="$(python3 scripts/resolve-modules.py \
-	--resolved "$TOP/out/meta/resolved-modules.yaml" --json \
-	| python3 -c "import json, sys; print('\n'.join(m['id'] for m in json.load(sys.stdin)))")"
+python3 scripts/resolve-modules.py resolve --output "$PLAN"
+python3 scripts/resolve-modules.py verify-inputs --plan "$PLAN" --phase all
 
-# DEFAULT_PASSWORD は default-user モジュールへの明示的な secret input。
-# モジュールが解決対象に含まれる場合だけ必須検証する (値はログ・生成 YAML・
-# resolved-modules.yaml に出力しない)。
-# 契約 (渡し先: default-user のみ) を守るため環境にはグローバル export せず、
-# 0600 の一時ファイルに置いて default-user の hook 起動時にだけ環境注入する
-# (render-bdebstrap.py が該当 hook の起動行にのみ配線する)
-if grep -qx "default-user" <<< "$resolved_ids"; then
-	if [[ -z "${DEFAULT_PASSWORD:-}" ]]; then
-		cat >&2 <<- 'EOF'
-		エラー: DEFAULT_PASSWORD が未設定です (default-user モジュールの必須 secret)。
-		  ローカルビルド: cp .env.example .env して DEFAULT_PASSWORD を設定してください
-		  (CI は workflow が DEFAULT_PASSWORD=debian を設定します)
+# secret input の汎用処理 (plan の requiredSecrets を処理する。module ID の
+# 特別扱いはしない)。値は環境にグローバル export せず、0600 の一時ファイルに
+# 置いて consumer module の hook 起動時にだけ環境注入する (render が配線する)
+SECRETS_DIR="$(mktemp -d)"
+trap 'rm -rf "$SECRETS_DIR"' EXIT
+secret_env_vars=""
+required_secrets="$(python3 scripts/resolve-modules.py required-secrets --plan "$PLAN")"
+while IFS=$'\t' read -r name consumer source; do
+	[[ -n $name ]] || continue
+	[[ $source == environment ]] || { echo "エラー: 未対応の secret source: $source" >&2; exit 1; }
+	value="${!name:-}"
+	if [[ -z $value ]]; then
+		cat >&2 <<- EOF
+		エラー: $name が未設定です (module '$consumer' の必須 secret)。
+		  ローカルビルド: cp .env.example .env して $name を設定してください
+		  (CI は workflow が設定します)
 		EOF
 		exit 1
 	fi
-	# chpasswd は行区切りで解釈するため、CR/LF を含む値は事故のもとなので拒否する
-	if [[ "$DEFAULT_PASSWORD" == *$'\n'* || "$DEFAULT_PASSWORD" == *$'\r'* ]]; then
-		echo "エラー: DEFAULT_PASSWORD に改行 (CR/LF) を含めることはできません" >&2
+	# chpasswd 等は行区切りで解釈するため、CR/LF を含む値は事故のもとなので拒否する
+	if [[ $value == *$'\n'* || $value == *$'\r'* ]]; then
+		echo "エラー: $name に改行 (CR/LF) を含めることはできません" >&2
 		exit 1
 	fi
-	SECRETS_DIR="$(mktemp -d)"
-	trap 'rm -rf "$SECRETS_DIR"' EXIT
-	(umask 077 && printf '%s' "$DEFAULT_PASSWORD" > "$SECRETS_DIR/default-password")
-	export E54C_DEFAULT_PASSWORD_FILE="$SECRETS_DIR/default-password"
+	(umask 077 && printf '%s' "$value" > "$SECRETS_DIR/$name")
+	export "E54C_SECRET_FILE_${name}=$SECRETS_DIR/$name"
+	secret_env_vars="${secret_env_vars:+$secret_env_vars,}E54C_SECRET_FILE_${name}"
+	# 値そのものは必ず環境から外す (bdebstrap 配下の全 hook が継承するのを防ぐ)
+	unset "$name"
+done <<< "$required_secrets"
+# sudo 経由の場合、secret ファイルのパス変数だけを通す (値そのものは通らない)
+if [[ -n $secret_env_vars && $EUID -ne 0 ]]; then
+	SUDO="sudo --preserve-env=${secret_env_vars}"
 fi
-# CI (-e) や .env の export 由来で環境に居座らないよう、値そのものは必ず外す
-# (bdebstrap 配下の全 hook が継承してしまうのを防ぐ)
-unset DEFAULT_PASSWORD
 
-python3 scripts/render-bdebstrap.py "$OUT"
+python3 scripts/render-bdebstrap.py --plan "$PLAN" "$OUT"
 
 # Radxa の deb (keyring / U-Boot) は apt 解決せず、dependencies.lock.yaml で
 # 固定した URL から取得して sha256 検証する (customize hook が dpkg で投入する)。
@@ -142,5 +147,13 @@ $SUDO bdebstrap -c "$OUT/bdebstrap.yaml" \
 	--force
 
 $SUDO chown -R "$(id -u):$(id -g)" "$OUT/build"
+
+# rootfs artifact との整合性検証用 sidecar (module 入力の由来 + tar 実体の記録) と、
+# plan から導出する人間向け provenance (再解決ではなく純粋な format 変換)
+python3 scripts/resolve-modules.py write-sidecar --plan "$PLAN" \
+	--rootfs "$OUT/build/rootfs.tar" --output "$OUT/build/rootfs.meta.json"
+python3 scripts/resolve-modules.py export-resolved --plan "$PLAN" \
+	--output "$TOP/out/meta/resolved-modules.yaml"
+
 echo "rootfs: $OUT/build/rootfs.tar"
 echo "manifest: $OUT/build/manifest"

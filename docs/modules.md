@@ -178,10 +178,27 @@ bundle (tar) にまとめてシリアル経由で 1 回だけ転送し、dispatc
 - ホスト側からの実 SSH ログイン検査は core harness (expect) が担当する
   (module テストの host-side phase は将来の Issue)
 
+## canonical ModulePlan (Issue #14)
+
+ビルドごとに Resolver が `out/meta/module-plan.json` を一度だけ生成し、
+build / test / Release の全 consumer はこの plan だけを参照する
+(modules/ の再探索・再解決はしない)。
+
+- plan は workspace 相対 path と content digest (sha256) を持ち、
+  absolute path / timestamp / secret 値を含まない (byte-identical に再生成できる)
+- consumer は利用直前に path の module-root containment / type / mode / digest を
+  再検証する (「Resolver が生成した plan だから安全」とは仮定しない)。
+  不一致は `module plan is stale` として拒否され、`make resolve` で再生成する
+- digest は 3 種: `artifact` (rootfs へ影響する入力)、`tests`、`plan`。
+  test のみの変更では artifact digest が変わらず、rootfs cache を再利用できる
+- rootfs.tar には sidecar (`rootfs.meta.json`) が付き、smoke test / image build が
+  plan の artifact digest と tar 実体の sha256 を照合する
+- 構造は `schemas/module.schema.json` / `schemas/module-plan.schema.json` が定義する
+
 ## provenance
 
-ビルドごとに有効化したモジュール一覧が `out/meta/resolved-modules.yaml` に
-生成され、Release に同梱される。
+ビルドごとに有効化したモジュール一覧が `out/meta/resolved-modules.yaml` として
+plan から導出され、`module-plan.json` とともに Release に同梱される。
 
 ```yaml
 apiVersion: e54c.image/v1alpha1

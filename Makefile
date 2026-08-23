@@ -11,7 +11,7 @@
 # Makefile の VERSION (=7) を上書きして LINUX_VERSION_CODE を壊す (実際に踏んだ)
 IMG_VERSION ?= dev
 
-.PHONY: all kernel rootfs image check clean distclean
+.PHONY: all kernel rootfs image resolve test-resolver check clean distclean
 
 all: kernel rootfs image
 
@@ -22,8 +22,16 @@ rootfs:
 	scripts/build-rootfs.sh
 	scripts/smoke-test-rootfs.sh
 
-# rootfs.tar の回帰検査のみ (ビルド環境不要)
-check:
+# canonical ModulePlan の再生成 (stale plan エラー時の復旧にも使う)
+resolve:
+	python3 scripts/resolve-modules.py resolve --output out/meta/module-plan.json
+
+# resolver の fixture テスト (determinism / traversal / tampering の異常系)
+test-resolver:
+	python3 scripts/tests/test_resolver.py
+
+# resolver テスト + rootfs.tar の回帰検査
+check: test-resolver
 	scripts/smoke-test-rootfs.sh
 
 image:

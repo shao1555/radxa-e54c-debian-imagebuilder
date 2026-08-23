@@ -43,7 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential flex bison bc libssl-dev libelf-dev libdw-dev dwarves \
         ccache \
         debhelper kmod rsync cpio git curl xz-utils \
-        python3 python3-yaml \
+        python3 python3-yaml python3-jsonschema \
         # イメージ組み立て
         libguestfs-tools gdisk parted \
         # QEMU ブートテスト (scripts/boot-test.sh)
