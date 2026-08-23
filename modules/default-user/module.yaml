@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-2.0-only
+apiVersion: e54c.image/v1alpha1
+kind: Module
+
+metadata:
+  id: default-user
+  description: 既定ログインアカウント (debian) と初期アクセス方針
+
+packages:
+  apt:
+    # login: trixie では Essential でなくなり variant=apt に含まれない。
+    # 無いと agetty が login(1) を exec できず、シリアルコンソールから
+    # 一切ログインできなくなる (QEMU ブートテストで検出した実績あり)
+    - login
+    - sudo
+
+hooks:
+  # DEFAULT_PASSWORD はこのモジュールへ渡される明示的な secret input
+  # (docs/modules.md 参照。default-user が解決対象のときだけ build-rootfs.sh が
+  #  必須検証する)
+  rootfs.customize:
+    - hooks/create-user.sh
+
+tests:
+  rootfs:
+    - tests/rootfs.sh

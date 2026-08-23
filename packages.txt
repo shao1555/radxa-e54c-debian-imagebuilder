@@ -1,28 +1,11 @@
 # rootfs に追加インストールする deb パッケージ (1 行 1 パッケージ、# はコメント)
 # suite 指定は pkg/suite-backports の形式で可
+#
+# 利用目的依存の機能は modules/<id>/module.yaml の packages.apt が所有する
+# (ssh / default-user / networkd / systemd-resolved / container-host /
+#  incus / k3s)。ここに残るのは base runtime のみ
 
-# --- コンテナ基盤 (このディストロの主目的) ---
-# Incus: LXC 陣営の現行コンテナ/VM マネージャ。trixie main に 6.0 LTS が収録済み。
-# OpenWrt コンテナは images:openwrt/* をそのまま起動できる
-incus
-incus-client
-# 低レベル LXC ツール (デバッグ・互換用)
-lxc
-# AppArmor の userspace。カーネル側を有効化しても apparmor_parser が無いと
-# incus は AppArmor サポートを無効化する (コンテナ隔離が弱くなる)
-apparmor
-
-# --- ネットワーク ---
-# ルーター用途の基本。OpenWrt コンテナの firewall4 はホストの nft モジュールを使う
-nftables
-systemd-resolved
-# DSA スイッチポートの操作・診断
-ethtool
-iproute2
-tcpdump
-
-# --- システム基本 ---
-# (openssh-server は modules/ssh が導入する)
+# --- システム基本 (base runtime) ---
 systemd-timesyncd
 ca-certificates
 curl
@@ -39,6 +22,3 @@ smartmontools
 htop
 tmux
 vim-tiny
-
-# NOTE: k3s は deb が無いため hooks/customize.d/10-install-k3s.sh で
-# バージョン・チェックサム固定の静的バイナリとして導入する

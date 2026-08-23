@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-2.0-only
+apiVersion: e54c.image/v1alpha1
+kind: Module
+
+metadata:
+  id: incus
+  description: Incus (LXC 陣営のコンテナ/VM マネージャ)。OpenWrt コンテナの実行基盤
+
+packages:
+  apt:
+    # trixie main に 6.0 LTS が収録済み。images:openwrt/* をそのまま起動できる
+    - incus
+    - incus-client
+    # 低レベル LXC ツール (デバッグ・互換用)
+    - lxc
+    # AppArmor の userspace。カーネル側を有効化しても apparmor_parser が無いと
+    # incus は AppArmor サポートを無効化する (コンテナ隔離が弱くなる)
+    - apparmor
+
+tests:
+  rootfs:
+    - tests/rootfs.sh
+  boot:
+    - tests/boot.sh

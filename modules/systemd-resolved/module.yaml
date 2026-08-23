@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-2.0-only
+apiVersion: e54c.image/v1alpha1
+kind: Module
+
+metadata:
+  id: systemd-resolved
+  description: ホスト DNS resolver (resolved stub を /etc/resolv.conf に向ける)
+
+packages:
+  apt:
+    - systemd-resolved
+
+hooks:
+  # resolv.conf の最終ポリシー (resolved stub への symlink) はこのモジュールが
+  # 所有する。core final seal は「regular file の漏洩拒否」だけを行い、
+  # このモジュールが張った symlink は上書きしない
+  rootfs.seal:
+    - hooks/resolv-conf.sh
+
+tests:
+  rootfs:
+    - tests/rootfs.sh
+  boot:
+    - tests/boot.sh

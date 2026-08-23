@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-2.0-only
+apiVersion: e54c.image/v1alpha1
+kind: Module
+
+metadata:
+  id: networkd
+  description: ホスト管理ネットワーク (lan1 を DHCP、他ポートはコンテナへ払い出し用に未設定)
+
+packages:
+  apt:
+    - iproute2
+    - ethtool # DSA スイッチポートの操作・診断
+    - tcpdump
+
+overlays:
+  - source: files
+    target: /
+
+hooks:
+  # Debian は networkd を既定で enable しないため明示する。これが無いと
+  # files/etc/systemd/network/*.network は一切機能しない
+  # (= 初回起動時に lan1 が DHCP せず SSH 到達不能になる)
+  rootfs.customize:
+    - hooks/enable-networkd.sh
+
+tests:
+  rootfs:
+    - tests/rootfs.sh
+  boot:
+    - tests/boot.sh

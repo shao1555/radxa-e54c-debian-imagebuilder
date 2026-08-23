@@ -24,48 +24,16 @@ export E54C_TEST_LIB="$TOP/scripts/test-lib.sh"
 source "$E54C_TEST_LIB"
 listing="$(cat "$LISTING_TMP")"
 
-# --- ネットワーク (初回起動で SSH 到達できること) ---
-enabled "systemd-networkd が enable"        'multi-user\.target\.wants/systemd-networkd\.service' 'systemd-networkd\.service'
-enabled "systemd-networkd.socket が enable" 'sockets\.target\.wants/systemd-networkd\.socket'     'systemd-networkd\.socket'
-enabled "systemd-resolved が enable"        'sysinit\.target\.wants/systemd-resolved\.service'    'systemd-resolved\.service'
-# (SSH 関連の検査は modules/ssh/tests/rootfs.sh に移行済み)
-# デフォルトユーザー: 存在 + ロックされていない (shadow がハッシュ) + sudo 所属
-if tar -xOf "$TAR" ./etc/passwd 2> /dev/null | grep -qE '^debian:x:[0-9]+:[0-9]+:.*:/home/debian:/bin/bash$'; then
-	echo "ok: debian ユーザーが存在"
-else
-	echo "NG: debian ユーザーが存在しない"
-	fail=1
-fi
-shadow_line="$(tar -xOf "$TAR" ./etc/shadow 2> /dev/null | grep '^debian:')"
-shadow_field="$(cut -d: -f2 <<< "$shadow_line")"
-if [[ $shadow_field == \$* ]]; then
-	echo "ok: debian のパスワードが設定済み (ロックされていない)"
-else
-	echo "NG: debian のパスワードが未設定またはロック (shadow: ${shadow_field:0:2}...)"
-	fail=1
-fi
-# 既知の初期パスワードのまま運用されないよう、初回ログイン時の変更強制
-# (chage -d 0 = shadow の第 3 フィールドが 0) を要求する
-if [[ "$(cut -d: -f3 <<< "$shadow_line")" == "0" ]]; then
-	echo "ok: 初回ログイン時のパスワード変更が強制される (lastchg=0)"
-else
-	echo "NG: パスワード変更の強制が無い (chage -d 0 が消えている)"
-	fail=1
-fi
-if tar -xOf "$TAR" ./etc/group 2> /dev/null | grep -qE '^sudo:.*[:,]debian(,|$)'; then
-	echo "ok: debian が sudo グループに所属"
-else
-	echo "NG: debian が sudo グループに所属していない"
-	fail=1
-fi
-# login(1): trixie では Essential でないため variant=apt に含まれず、
-# 欠けるとシリアルコンソールからログイン不能になる (QEMU ブートテストで検出)
-check "login バイナリ (シリアルログインに必要)" '^-rwx.* \./usr/bin/login$'
-check "resolv.conf が resolved の stub へ symlink" \
-	'^l.* \./etc/resolv\.conf -> \.\./run/systemd/resolve/stub-resolv\.conf$'
+# (利用目的依存の検査は各モジュールの tests/rootfs.sh に移行済み:
+#  ssh / default-user / networkd / systemd-resolved / container-host /
+#  incus / k3s。以下は framework/board invariant のみ)
+
+# resolv.conf の安全 invariant: ビルドホスト由来の regular file と .bak を
+# 成果物に残さない。resolved の有無によらず core final seal が保証する
+# (symlink の最終ポリシーは systemd-resolved モジュールが所有・検査する)
+check_absent "ビルドホスト resolv.conf の漏洩 (regular file)" '^-.* \./etc/resolv\.conf$'
 check_absent "ビルドホスト DNS の漏洩 (.resolv.conf.systemd-resolved.bak)" \
 	'\./etc/\.resolv\.conf\.systemd-resolved\.bak$'
-check "lan1 の .network 設定"             '\./etc/systemd/network/10-lan1\.network$'
 
 # --- ブート (カーネル・DTB・extlinux) ---
 # 通常ファイルも「^-(種別) + フルパス + 行末 $」で固定し、.bak/.old 等への
@@ -137,27 +105,6 @@ check "radxa リポジトリの sources.list"    '\./etc/apt/sources\.list\.d/80
 check "radxa リポジトリの pin 設定"        '\./etc/apt/preferences\.d/radxa-uboot-only$'
 check "radxa keyring"                      '\./usr/share/keyrings/radxa-archive-keyring\.gpg'
 
-# --- コンテナ基盤 ---
-check "incus (実行可)"                     '^-rwx.* \./usr/bin/incus$'
-check "k3s バイナリ (実行可)"              '^-rwx.* \./usr/local/bin/k3s$'
-check "k3s の systemd unit"                '^-.* \./etc/systemd/system/k3s\.service$'
-# k3s は「既定では無効」。初回ブートの preset-all (Debian 既定 enable *) が
-# 勝手に enable して restart ループする回帰を踏んだため、preset ファイルで固定する
-check "k3s を disable する preset"         '^-.* \./etc/systemd/system-preset/50-e54c\.preset$'
-check_absent "k3s が enable されていない" \
-	'\./etc/systemd/system/multi-user\.target\.wants/k3s\.service'
-
-# AppArmor: カーネル側の有効化だけでは不十分で、apparmor_parser が無いと
-# incus が AppArmor サポートを無効化する
-check "apparmor_parser (incus のコンテナ隔離に必要)" '^-rwx.* \./usr/sbin/apparmor_parser$'
-
-# OpenWrt firewall4 の標準 ruleset が必要とする nft モジュール群
-# (debian ベース config は CONFIG_MODULE_COMPRESS_XZ=y のため .ko.xz になる)
-for m in nft_limit nft_log nft_redir nft_quota nft_numgen nft_hash nft_fib_inet \
-	nft_ct nft_nat nft_masq nft_reject; do
-	check "nft モジュール: $m" "/${m}\\.ko(\\.(gz|xz|zst))?\$"
-done
-
 # microSD ブートの生命線。QEMU テストは virtio ディスクのため実 SD コントローラ
 # (dw_mmc) を検証できず、ここで静的に固定する
 check "dw_mmc-rockchip モジュール (microSD ブートに必要)" \
@@ -167,7 +114,8 @@ check "dw_mmc-rockchip モジュール (microSD ブートに必要)" \
 # zstd 圧縮のため lsinitramfs で内部を見る)
 initrd_member="$(tar -tf "$TAR" | grep -E '^\./boot/initrd\.img-[0-9]' | head -1 || true)"
 initrd_tmp="$(mktemp)"
-trap 'rm -f "$initrd_tmp"' EXIT
+# trap の再設定は先の trap を上書きするため、両方の一時ファイルを掃除する
+trap 'rm -f "$initrd_tmp" "$LISTING_TMP"' EXIT
 if ! command -v lsinitramfs > /dev/null; then
 	echo "NG: lsinitramfs が無い (initramfs-tools-core を入れること。initrd 検査に必要)"
 	fail=1
