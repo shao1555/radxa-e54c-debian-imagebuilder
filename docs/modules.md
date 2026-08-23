@@ -62,7 +62,40 @@ tests:
     - tests/rootfs.sh
   boot:
     - tests/boot.sh
+
+configuration:                 # typed configuration (任意。Issue #20)
+  schema:                      # inline JSON Schema (Draft 2020-12)
+    type: object               # root は type: object 必須
+    additionalProperties: false  # 必須
+    required: [username]
+    properties:
+      username:
+        type: string
+        pattern: "^[a-z_][a-z0-9_-]{0,31}$"
+  defaults:                    # Resolver が適用する既定値 (schema で検証される)
+    username: debian
+
+secrets:                       # secret input の宣言 (任意)
+  initial-password:            # 論理 ID (^[a-z][a-z0-9-]{0,62}$)
+    required: true
+    description: 説明
 ```
+
+### configuration の規則
+
+- schema は **allowlist された keyword のみ**使える: type / properties /
+  required / additionalProperties / items / enum / const / pattern /
+  minLength / maxLength / minimum / maximum / minItems / maxItems /
+  uniqueItems / description / title。
+  `$ref` `$id` `$defs` `format` を含む allowlist 外の keyword は拒否される
+  (format は必要になった時点で検証動作とともに明示追加する)
+- 解決順序: `configuration.defaults` → BuildRequest
+  (config.yaml の `moduleConfiguration.<id>`) を **recursive merge**
+  (object は再帰、scalar / array は override が置換、null は schema が許す
+  ときだけ通常の値) → merge 結果を schema で検証 → `ModulePlan.modules[].config`
+- 未知の module ID への設定、未知の property、型・pattern 違反、
+  required 不足、defaults 自体の schema 違反はすべて fail-fast
+- 解決済み config は artifact digest に含まれる (設定変更で rootfs が再構築される)
 
 ### スクリプト参照の制限
 
@@ -99,27 +132,31 @@ rootfs 生成の全体順序:
   モジュールは core の封印処理後に成果物を書き戻せない
 - hook には **rootfs のパス (tar 化前の展開済みディレクトリ) が第 1 引数**として
   渡され、builder 上 (chroot 外) で実行される。tar 化後の再展開は行われない
+- hook / test には `E54C_MODULE_ID` と `E54C_MODULE_CONFIG` (その module の
+  解決済み config だけを含む canonical JSON ファイルのパス) が渡される。
+  module は config.yaml / profile / ModulePlan 全体を直接読んではならない
 
-### secret input (限定契約)
+### secret input
 
-hook が参照できる環境変数は、契約に明記されたものだけである。
-偶然継承された環境変数はモジュール API ではなく、依存してはならない。
+secret は module manifest の `secrets:` で**宣言**し、参照元 (どの環境変数から
+値を取るか) は BuildRequest (config.yaml の `secretReferences`) が与える。
+module 固有の secret 定義は framework コードにハードコードされない。
 
-| 変数 | 渡し先 | 内容 |
-|---|---|---|
-| `DEFAULT_PASSWORD` | 組み込み `default-user` モジュールのみ | 既定ユーザーの初期パスワード |
-
-- `DEFAULT_PASSWORD` は `default-user` が解決対象に含まれる場合だけ
-  build-rootfs.sh が必須検証する (モジュールを外せば framework は要求しない)
-- 値は環境にグローバル export されない。builder が 0600 の一時ファイルに保持し、
-  consumer module の hook 起動時にだけ環境変数として注入する。
-  **注意**: 値そのものは他モジュールの hook 環境に現れないが、secret ファイル
-  パスの capability は同一ビルド内の全 hook が読める。MVP では組み込み
-  モジュールを単一の trust domain として許容しており、外部モジュール対応前に
-  per-hook の隔離 (sanitized environment / read-only staging / sandbox) を設計する
-- 値をログ、生成 YAML (bdebstrap.yaml)、`resolved-modules.yaml` に出力しない
-- 外部モジュール導入時には、モジュールごとの入力宣言と環境の sanitize を
-  別途設計する (それまで新しい環境変数契約は追加しない)
+- 必須 secret に参照が無い、宣言の無い secret への参照、未選択 module への
+  参照はすべて fail-fast
+- plan には**参照情報のみ** (`requiredSecrets`) が記録され、値は resolve 時に
+  読み取りすらしない。値・値の単純 hash を plan / ログ / 生成 YAML /
+  cache key に含めない
+- builder は値を 0600 の一時ファイルに置き、そのパスを `fileEnvironment`
+  変数で hook から読めるようにする。値そのものはどのプロセスの環境にも現れない
+- `fileEnvironment` 名は framework が module ID / secret ID から決定的に生成する
+  (長さプレフィクスで境界を一意化。例: `default-user` / `initial-password` →
+  `E54C_SECRET_FILE_M12_DEFAULT_USER_S16_INITIAL_PASSWORD`)。
+  生成名の全体重複も検査される
+- **注意**: secret ファイルパスの capability は同一ビルド内の全 hook が読める。
+  MVP では組み込みモジュールを単一の trust domain として許容しており、
+  外部モジュール対応前に per-hook の隔離 (sanitized environment /
+  read-only staging / sandbox) を設計する
 
 | phase | 実行場所 | MVP |
 |---|---|---|

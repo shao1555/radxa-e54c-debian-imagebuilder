@@ -10,8 +10,7 @@ TOP="$PWD"
 OUT="$TOP/out/rootfs"
 mkdir -p "$OUT"
 
-# devcontainer 内は root で動くため sudo を無効化。非 root では sudo の
-# env_reset で DEFAULT_PASSWORD が落ちないよう明示的に保持する
+# devcontainer 内は root で動くため sudo を無効化
 SUDO="sudo"
 [[ $EUID -eq 0 ]] && SUDO=""
 
@@ -22,9 +21,8 @@ if [[ -f "$TOP/.env" ]]; then
 	source "$TOP/.env"
 fi
 
-# (DEFAULT_PASSWORD の検証はモジュール解決後に行う: default-user モジュールが
-#  解決対象に含まれる場合だけ必須とする。将来モジュールを無効化しても
-#  framework が不要な secret を要求し続けないための境界)
+# (secret の必要性は plan の requiredSecrets が決める: module manifest の宣言と
+#  config.yaml の secretReferences から導出される。module を外せば要求されない)
 
 # カーネル deb と E54C の DTB の存在を事前検証する。無いまま進めると
 # 「正常に生成されたが起動不能な rootfs」ができてしまう。
@@ -67,34 +65,33 @@ fi
 [[ -f $PLAN ]] || { echo "エラー: module-plan が無い: $PLAN (make resolve)" >&2; exit 1; }
 
 # secret input の汎用処理 (plan の requiredSecrets を処理する。module ID の
-# 特別扱いはしない)。値は環境にグローバル export せず、0600 の一時ファイルに
-# 置いて consumer module の hook 起動時にだけ環境注入する (render が配線する)
+# 特別扱いはしない)。値は環境に一切残さず、0600 の一時ファイルに置いて
+# fileEnvironment (パス変数) だけを consumer hook から読める形で export する
 SECRETS_DIR="$(mktemp -d)"
 trap 'rm -rf "$SECRETS_DIR"' EXIT
 secret_env_vars=""
 required_secrets="$(python3 scripts/resolve-modules.py required-secrets --plan "$PLAN")"
-while IFS=$'\t' read -r name consumer source; do
-	[[ -n $name ]] || continue
-	[[ $source == environment ]] || { echo "エラー: 未対応の secret source: $source" >&2; exit 1; }
-	value="${!name:-}"
+while IFS=$'\t' read -r sid consumer src_name file_env; do
+	[[ -n $sid ]] || continue
+	value="${!src_name:-}"
 	if [[ -z $value ]]; then
 		cat >&2 <<- EOF
-		エラー: $name が未設定です (module '$consumer' の必須 secret)。
-		  ローカルビルド: cp .env.example .env して $name を設定してください
+		エラー: $src_name が未設定です (module '$consumer' の secret '$sid')。
+		  ローカルビルド: cp .env.example .env して $src_name を設定してください
 		  (CI は workflow が設定します)
 		EOF
 		exit 1
 	fi
 	# chpasswd 等は行区切りで解釈するため、CR/LF を含む値は事故のもとなので拒否する
 	if [[ $value == *$'\n'* || $value == *$'\r'* ]]; then
-		echo "エラー: $name に改行 (CR/LF) を含めることはできません" >&2
+		echo "エラー: $src_name に改行 (CR/LF) を含めることはできません" >&2
 		exit 1
 	fi
-	(umask 077 && printf '%s' "$value" > "$SECRETS_DIR/$name")
-	export "E54C_SECRET_FILE_${name}=$SECRETS_DIR/$name"
-	secret_env_vars="${secret_env_vars:+$secret_env_vars,}E54C_SECRET_FILE_${name}"
+	(umask 077 && printf '%s' "$value" > "$SECRETS_DIR/$sid")
+	export "${file_env}=$SECRETS_DIR/$sid"
+	secret_env_vars="${secret_env_vars:+$secret_env_vars,}${file_env}"
 	# 値そのものは必ず環境から外す (bdebstrap 配下の全 hook が継承するのを防ぐ)
-	unset "$name"
+	unset "$src_name"
 done <<< "$required_secrets"
 # sudo 経由の場合、secret ファイルのパス変数だけを通す (値そのものは通らない)
 if [[ -n $secret_env_vars && $EUID -ne 0 ]]; then

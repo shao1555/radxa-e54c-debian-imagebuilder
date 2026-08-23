@@ -7,6 +7,24 @@ target:
   board: radxa-e54c
   architecture: arm64
 
+# モジュール設定の上書き (module manifest の configuration.defaults に対する
+# override。空 {} なら既定値がそのまま使われる)。
+# 例: 教育用途で既定ユーザー名を変え、授業中のパスワード変更強制を止める場合:
+# moduleConfiguration:
+#   default-user:
+#     username: student
+#     requirePasswordChange: false   # 安全性は下がる。明示的な選択のみ
+moduleConfiguration: {}
+
+# secret の参照元 (module manifest の secrets 宣言に対する供給元)。
+# 値そのものはここに書かない (環境変数名のみ)
+secretReferences:
+  default-user:
+    initial-password:
+      source:
+        type: environment
+        name: DEFAULT_PASSWORD
+
 image:
   name: e54c-server        # 出力: <name>_<suite>_<version>.img.xz
   hostname: e54c-server

@@ -5,17 +5,31 @@
   "description": "modules/<id>/module.yaml の構造検証。ファイル実在・実行ビット・symlink・containment・overlay 競合は Resolver の semantic validation が行う",
   "type": "object",
   "additionalProperties": false,
-  "required": ["apiVersion", "kind", "metadata"],
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata"
+  ],
   "properties": {
-    "apiVersion": { "const": "e54c.image/v1alpha1" },
-    "kind": { "const": "Module" },
+    "apiVersion": {
+      "const": "e54c.image/v1alpha1"
+    },
+    "kind": {
+      "const": "Module"
+    },
     "metadata": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id"],
+      "required": [
+        "id"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/moduleId" },
-        "description": { "type": "string" }
+        "id": {
+          "$ref": "#/$defs/moduleId"
+        },
+        "description": {
+          "type": "string"
+        }
       }
     },
     "packages": {
@@ -24,7 +38,10 @@
       "properties": {
         "apt": {
           "type": "array",
-          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+(/[a-z0-9-]+)?$" }
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9+.-]+(/[a-z0-9-]+)?$"
+          }
         }
       }
     },
@@ -33,10 +50,16 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["source"],
+        "required": [
+          "source"
+        ],
         "properties": {
-          "source": { "$ref": "#/$defs/relativePath" },
-          "target": { "type": "string" }
+          "source": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "target": {
+            "type": "string"
+          }
         }
       }
     },
@@ -44,19 +67,70 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "rootfs.customize": { "$ref": "#/$defs/scriptList" },
-        "rootfs.seal": { "$ref": "#/$defs/scriptList" },
-        "image.finalize": { "$ref": "#/$defs/scriptList" },
-        "runtime.firstBoot": { "$ref": "#/$defs/scriptList" }
+        "rootfs.customize": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "rootfs.seal": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "image.finalize": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "runtime.firstBoot": {
+          "$ref": "#/$defs/scriptList"
+        }
       }
     },
     "tests": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "rootfs": { "$ref": "#/$defs/scriptList" },
-        "boot": { "$ref": "#/$defs/scriptList" },
-        "hardware": { "$ref": "#/$defs/scriptList" }
+        "rootfs": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "boot": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "hardware": {
+          "$ref": "#/$defs/scriptList"
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "defaults"
+      ],
+      "properties": {
+        "schema": {
+          "type": "object"
+        },
+        "defaults": {
+          "type": "object"
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]{0,62}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "required"
+        ],
+        "properties": {
+          "required": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
       }
     }
   },
@@ -72,7 +146,9 @@
     },
     "scriptList": {
       "type": "array",
-      "items": { "$ref": "#/$defs/relativePath" }
+      "items": {
+        "$ref": "#/$defs/relativePath"
+      }
     }
   }
 }

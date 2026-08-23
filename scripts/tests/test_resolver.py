@@ -423,5 +423,273 @@ class ResolverTest(unittest.TestCase):
         self.assertIn("再構築", r.stderr)
 
 
+def add_configured_module(ws, *, defaults=None, schema_extra=None, secret=True):
+    """configuration + secrets を宣言する module (gamma) を fixture に追加する"""
+    d = ws / "modules" / "gamma"
+    (d / "hooks").mkdir(parents=True)
+    h = d / "hooks/setup.sh"
+    h.write_text("#!/bin/sh\nexit 0\n")
+    h.chmod(0o755)
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["name", "nested"],
+        "properties": {
+            "name": {"type": "string", "pattern": "^[a-z]+$"},
+            "nested": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "a": {"type": "integer"},
+                    "b": {"type": "integer"},
+                },
+            },
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    if schema_extra:
+        schema["properties"].update(schema_extra)
+    spec = {
+        "apiVersion": "e54c.image/v1alpha1",
+        "kind": "Module",
+        "metadata": {"id": "gamma"},
+        "configuration": {
+            "schema": schema,
+            "defaults": defaults
+            if defaults is not None
+            else {"name": "abc", "nested": {"a": 1, "b": 2}, "tags": ["x", "y"]},
+        },
+        "hooks": {"rootfs.customize": ["hooks/setup.sh"]},
+    }
+    if secret:
+        spec["secrets"] = {"api-token": {"required": True, "description": "テスト"}}
+    import yaml as _yaml
+
+    (d / "module.yaml").write_text(_yaml.safe_dump(spec, allow_unicode=True))
+    return d
+
+
+def set_config_yaml(ws, module_config=None, secret_refs=None):
+    lines = [
+        "target:",
+        "  board: radxa-e54c",
+        "  architecture: arm64",
+        "debian:",
+        "  suite: trixie",
+    ]
+    import yaml as _yaml
+
+    text = "\n".join(lines) + "\n"
+    if module_config is not None:
+        text += _yaml.safe_dump({"moduleConfiguration": module_config},
+                                allow_unicode=True)
+    if secret_refs is not None:
+        text += _yaml.safe_dump({"secretReferences": secret_refs}, allow_unicode=True)
+    (ws / "config.yaml").write_text(text)
+
+
+GAMMA_REF = {"gamma": {"api-token": {"source": {"type": "environment",
+                                                "name": "GAMMA_TOKEN"}}}}
+
+
+class ConfigurationTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.ws = make_workspace(self.tmp)
+        add_configured_module(self.ws)
+        set_config_yaml(self.ws, secret_refs=GAMMA_REF)
+
+    def plan(self):
+        r, path = resolve(self.ws)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(path.read_text()), path
+
+    def gamma(self, plan):
+        return next(m for m in plan["modules"] if m["id"] == "gamma")
+
+    def test_defaults_only(self):
+        plan, _ = self.plan()
+        self.assertEqual(self.gamma(plan)["config"],
+                         {"name": "abc", "nested": {"a": 1, "b": 2},
+                          "tags": ["x", "y"]})
+
+    def test_override_merge_and_replace(self):
+        # object は再帰 merge (nested.a 保持)、scalar / array は置換
+        set_config_yaml(self.ws,
+                        module_config={"gamma": {"name": "xyz",
+                                                 "nested": {"b": 9},
+                                                 "tags": ["z"]}},
+                        secret_refs=GAMMA_REF)
+        plan, _ = self.plan()
+        self.assertEqual(self.gamma(plan)["config"],
+                         {"name": "xyz", "nested": {"a": 1, "b": 9}, "tags": ["z"]})
+
+    def assert_fail(self, needle):
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(needle, r.stderr)
+
+    def test_unknown_module_in_configuration(self):
+        set_config_yaml(self.ws, module_config={"nonexistent": {"x": 1}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("選択されていない")
+
+    def test_unknown_property_rejected(self):
+        set_config_yaml(self.ws, module_config={"gamma": {"bogus": 1}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("schema 違反")
+
+    def test_type_violation_rejected(self):
+        set_config_yaml(self.ws, module_config={"gamma": {"name": 5}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("schema 違反")
+
+    def test_pattern_violation_rejected(self):
+        set_config_yaml(self.ws, module_config={"gamma": {"name": "ABC"}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("schema 違反")
+
+    def test_required_missing_rejected(self):
+        # defaults から required の name を落とす → default も override も無い
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(self.ws, defaults={"nested": {"a": 1, "b": 2}})
+        self.assert_fail("schema 違反")
+
+    def test_defaults_schema_violation_rejected(self):
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(
+            self.ws, defaults={"name": "ABC", "nested": {"a": 1, "b": 2}})
+        self.assert_fail("schema 違反")
+
+    def test_config_change_updates_artifact_not_tests(self):
+        plan1, _ = self.plan()
+        set_config_yaml(self.ws, module_config={"gamma": {"name": "xyz"}},
+                        secret_refs=GAMMA_REF)
+        plan2, _ = self.plan()
+        self.assertNotEqual(plan1["digests"]["artifact"], plan2["digests"]["artifact"])
+        self.assertNotEqual(plan1["digests"]["plan"], plan2["digests"]["plan"])
+        self.assertEqual(plan1["digests"]["tests"], plan2["digests"]["tests"])
+
+    def test_configuration_for_module_without_declaration(self):
+        set_config_yaml(self.ws, module_config={"alpha": {"x": 1}},
+                        secret_refs=GAMMA_REF)
+        self.assert_fail("configuration を宣言していない")
+
+    def test_inline_schema_ref_rejected(self):
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(self.ws, schema_extra={"evil": {"$ref": "#/x"}})
+        self.assert_fail("未対応の schema keyword")
+
+    def test_inline_schema_format_rejected(self):
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(self.ws, schema_extra={"mail": {"format": "email"}})
+        self.assert_fail("未対応の schema keyword")
+
+    def test_property_named_like_keyword_allowed(self):
+        # properties 配下の property 名 "pattern" は keyword ではない
+        shutil.rmtree(self.ws / "modules/gamma")
+        add_configured_module(self.ws, schema_extra={"pattern": {"type": "string"}})
+        r, _ = resolve(self.ws)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class SecretReferenceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.ws = make_workspace(self.tmp)
+        add_configured_module(self.ws)
+        set_config_yaml(self.ws, secret_refs=GAMMA_REF)
+
+    def plan(self):
+        r, path = resolve(self.ws)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(path.read_text()), path
+
+    def test_required_secrets_derived(self):
+        plan, path = self.plan()
+        self.assertEqual(plan["requiredSecrets"], [{
+            "id": "api-token", "consumer": "gamma",
+            "source": {"type": "environment", "name": "GAMMA_TOKEN"},
+            "fileEnvironment": "E54C_SECRET_FILE_M5_GAMMA_S9_API_TOKEN",
+        }])
+        # secret 値 (環境変数の中身) が plan に現れない
+        self.assertNotIn("secret-value", path.read_text())
+
+    def test_resolve_does_not_read_secret_value(self):
+        # GAMMA_TOKEN が未設定でも resolve は成功する (値は resolve 時に読まない)
+        env = dict(os.environ)
+        env.pop("GAMMA_TOKEN", None)
+        r = subprocess.run(
+            [sys.executable, str(RESOLVER), "--workspace", str(self.ws),
+             "resolve", "--output", str(self.ws / "out/meta/module-plan.json")],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_missing_required_reference_rejected(self):
+        set_config_yaml(self.ws)  # secretReferences 無し
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("必須 secret", r.stderr)
+
+    def test_undeclared_reference_rejected(self):
+        set_config_yaml(self.ws, secret_refs={
+            **GAMMA_REF,
+            "alpha": {"nope": {"source": {"type": "environment", "name": "X"}}}})
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("宣言していない secret", r.stderr)
+
+    def test_reference_to_unknown_module_rejected(self):
+        set_config_yaml(self.ws, secret_refs={
+            **GAMMA_REF,
+            "ghost": {"tok": {"source": {"type": "environment", "name": "X"}}}})
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("選択されていない", r.stderr)
+
+    def test_secret_reference_change_updates_artifact(self):
+        plan1, _ = self.plan()
+        set_config_yaml(self.ws, secret_refs={
+            "gamma": {"api-token": {"source": {"type": "environment",
+                                               "name": "OTHER_VAR"}}}})
+        plan2, _ = self.plan()
+        self.assertNotEqual(plan1["digests"]["artifact"], plan2["digests"]["artifact"])
+
+    def test_env_name_encoding_no_ambiguity(self):
+        # a-b/c と a/b-c は長さプレフィクスで別名になる
+        self.assertNotEqual(
+            resolver_mod.secret_file_environment("a-b", "c"),
+            resolver_mod.secret_file_environment("a", "b-c"))
+
+    def test_alternate_username_plumbing(self):
+        # harness が hard-coded username に依存しない配線の軽量検証:
+        # default-user 相当の module に別 username を設定し、
+        # module-config CLI が解決済み username を返すこと
+        d = self.ws / "modules" / "default-user"
+        (d / "hooks").mkdir(parents=True)
+        import yaml as _yaml
+        spec = {
+            "apiVersion": "e54c.image/v1alpha1", "kind": "Module",
+            "metadata": {"id": "default-user"},
+            "configuration": {
+                "schema": {"type": "object", "additionalProperties": False,
+                           "required": ["username"],
+                           "properties": {"username": {"type": "string"}}},
+                "defaults": {"username": "debian"},
+            },
+        }
+        (d / "module.yaml").write_text(_yaml.safe_dump(spec))
+        set_config_yaml(self.ws,
+                        module_config={"default-user": {"username": "student"}},
+                        secret_refs=GAMMA_REF)
+        _, path = self.plan()
+        r = run(self.ws, "module-config", "--plan", str(path),
+                "--module", "default-user")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["username"], "student")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

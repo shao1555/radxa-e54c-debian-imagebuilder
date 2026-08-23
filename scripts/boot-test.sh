@@ -75,10 +75,15 @@ qemu-img resize -f raw "$IMG" +2G
 # core 検査 + モジュールの boot テスト + 共通 lib + dispatcher を 1 つの tar に
 # まとめ、シリアル転送は 1 回のまま各テストを独立プロセスで実行する
 BUNDLE="$WORK/boot-tests"
-mkdir -p "$BUNDLE/modules"
+mkdir -p "$BUNDLE/modules" "$BUNDLE/config"
 cp "$TOP/scripts/boot-test-lib.sh" "$BUNDLE/test-lib.sh"
 cp "$TOP/scripts/boot-check.sh" "$BUNDLE/core.sh"
 cp "$TOP/scripts/boot-test-run.sh" "$BUNDLE/run.sh"
+# 各 module の解決済み config を bundle に含める (dispatcher が該当 module の
+# test にだけ E54C_MODULE_CONFIG を設定する。test 実行対象の modules/ とは
+# 別ディレクトリに置き、config が test として実行されないようにする)
+python3 "$TOP/scripts/resolve-modules.py" write-configs --plan "$PLAN" \
+	--output-dir "$BUNDLE/config"
 # modules/ は再探索しない: plan に記載された boot test だけを bundle に入れる。
 # list-tests は出力前に containment / type / mode / digest を再検証する
 # (stale / 改ざん plan なら失敗)。変数受けで失敗を set -e に伝播させる。
@@ -95,4 +100,22 @@ while IFS=$'\t' read -r mid idx t; do
 done <<< "$module_boot_tests"
 tar -cf "$WORK/boot-tests.tar" -C "$BUNDLE" .
 
-expect "$TOP/scripts/boot-test.expect" "$IMG" "$WORK/boot-tests.tar" "$SSH_PORT"
+# core login harness は「この成果物へ既定ユーザーでログインできること」の
+# integration test であり、default-user の解決済み config (username /
+# requirePasswordChange) を検証済み consumer API (module-config) から取得する。
+# default-user が選択されていない構成ではログイン手段を仮定できないため、
+# 黙って実行せず明示的に失敗させる (別の access provider は profile 導入時に設計)
+du_config="$(python3 "$TOP/scripts/resolve-modules.py" module-config \
+	--plan "$PLAN" --module default-user 2> /dev/null)" || {
+	echo "エラー: core login harness requires an access provider" >&2
+	echo "  (default-user モジュールが plan に含まれていない)" >&2
+	exit 1
+}
+login_user="$(python3 -c "import json, sys; print(json.loads(sys.argv[1])['username'])" "$du_config")"
+require_change="$(python3 -c "import json, sys; print(str(json.loads(sys.argv[1])['requirePasswordChange']).lower())" "$du_config")"
+# 初期パスワードの値は plan に含まれない (設計)。harness は既定 debian を使い、
+# 変更したビルドでは BOOT_TEST_PASSWORD で上書きする
+BOOT_TEST_PASSWORD="${BOOT_TEST_PASSWORD:-debian}"
+
+expect "$TOP/scripts/boot-test.expect" "$IMG" "$WORK/boot-tests.tar" "$SSH_PORT" \
+	"$login_user" "$BOOT_TEST_PASSWORD" "$require_change"

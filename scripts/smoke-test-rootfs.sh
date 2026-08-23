@@ -165,11 +165,16 @@ fi
 # list-tests は出力前に containment / type / mode / digest を再検証し、
 # stale / 改ざん plan なら失敗する。モジュールテストは追加のみ可能で、
 # core invariant を無効化できない (fail は集約のみ)
+# 各 module へは自分の解決済み config だけを渡す (plan 全体は渡さない)
+CONFIG_DIR="$(mktemp -d)"
+trap 'rm -f "$initrd_tmp" "$LISTING_TMP"; rm -rf "$CONFIG_DIR"' EXIT
+python3 scripts/resolve-modules.py write-configs --plan "$PLAN" --output-dir "$CONFIG_DIR"
 module_tests="$(python3 scripts/resolve-modules.py list-tests --plan "$PLAN" --phase rootfs)"
 while IFS=$'\t' read -r mid t; do
 	[[ -n $mid ]] || continue
 	echo "module[$mid] rootfs test: $t"
-	if E54C_MODULE_ID="$mid" "$TOP/$t" 2>&1 | sed "s/^/module[$mid] /"; then
+	if E54C_MODULE_ID="$mid" E54C_MODULE_CONFIG="$CONFIG_DIR/$mid.json" \
+		"$TOP/$t" 2>&1 | sed "s/^/module[$mid] /"; then
 		:
 	else
 		echo "NG: module[$mid] の rootfs test が失敗 ($t)"

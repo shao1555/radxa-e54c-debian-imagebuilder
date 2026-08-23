@@ -48,12 +48,30 @@ RESERVED_HOOK_PHASES = ("image.finalize", "runtime.firstBoot")
 SUPPORTED_TEST_PHASES = ("rootfs", "boot")
 RESERVED_TEST_PHASES = ("hardware",)
 
-# 組み込み module への secret input の集中定義 (docs/modules.md の限定契約)。
-# module ID の特別扱いをここ 1 箇所に集約する。後続の configuration Issue で
-# module manifest からの宣言へ移行する
-BUILTIN_SECRETS = {
-    "default-user": [{"name": "DEFAULT_PASSWORD", "source": "environment"}],
+# module manifest の inline configuration schema で MVP が許可する keyword
+# (allowlist。禁止列挙より安全。外部参照・別 resource 評価につながるものは
+#  すべて拒否され、format も MVP では拒否する: 黙って無視すると module 作者が
+#  検証済みだと誤解するため)
+SCHEMA_ALLOWED_KEYWORDS = {
+    "type", "properties", "required", "additionalProperties", "items",
+    "enum", "const", "pattern", "minLength", "maxLength",
+    "minimum", "maximum", "minItems", "maxItems", "uniqueItems",
+    "description", "title",
 }
+ID_RE = r"^[a-z][a-z0-9-]{0,62}$"
+
+
+def encode_env_component(s):
+    return s.upper().replace("-", "_")
+
+
+def secret_file_environment(module_id, secret_id):
+    """secret ファイルパスを渡す環境変数名。長さプレフィクスで境界を一意にする
+    (単純な <MODULE>_<SECRET> 連結は a-b/c と a/b-c が衝突する)"""
+    return (
+        f"E54C_SECRET_FILE_M{len(module_id)}_{encode_env_component(module_id)}"
+        f"_S{len(secret_id)}_{encode_env_component(secret_id)}"
+    )
 
 
 class ResolveError(Exception):
@@ -143,7 +161,9 @@ def schema_validate(instance, schema, what):
 # --- Resolution Pipeline -----------------------------------------------------
 
 def load_build_request(workspace):
-    """1. BuildRequest (現在は config.yaml からの暗黙値)"""
+    """1. BuildRequest。config.yaml adapter が機械的に生成する (module 固有の
+    既定値や secret 宣言はハードコードしない。将来は profile parser も同じ
+    形式を生成し、Resolver 入口で同じ schema 検証を受ける)"""
     cfg = yaml.safe_load((workspace / "config.yaml").read_text())
     target = cfg.get("target") or {}
     board = target.get("board")
@@ -153,12 +173,81 @@ def load_build_request(workspace):
         raise ResolveError(
             "config.yaml に target.board / target.architecture / debian.suite が必要"
         )
-    return {
+    request = {
         "target": {"board": board, "architecture": arch, "suite": suite},
         "selection": {"mode": "all-builtin"},
-        "configuration": {},
-        "secretReferences": {},
+        "moduleConfiguration": cfg.get("moduleConfiguration") or {},
+        "secretReferences": cfg.get("secretReferences") or {},
     }
+    schema_validate(
+        request, load_schema(workspace, "build-request.schema.json"), "BuildRequest"
+    )
+    return request
+
+
+def check_inline_schema(schema, what, path="configuration.schema"):
+    """module manifest の inline JSON Schema の安全性検証。
+    許可 keyword の allowlist (SCHEMA_ALLOWED_KEYWORDS) 方式で、外部参照や
+    別 resource 評価につながる keyword・未知の keyword を拒否する。
+    properties 配下の property 名は schema keyword として誤判定しない"""
+    if not isinstance(schema, dict):
+        raise ResolveError(f"{what}: {path} は object であること")
+    for key, value in schema.items():
+        if key not in SCHEMA_ALLOWED_KEYWORDS:
+            raise ResolveError(
+                f"{what}: {path} に未対応の schema keyword: {key!r} "
+                "(MVP の allowlist 外。format も含め必要になった時点で明示追加する)"
+            )
+        if key == "properties":
+            if not isinstance(value, dict):
+                raise ResolveError(f"{what}: {path}.properties は object であること")
+            for prop, sub in value.items():
+                # property 名は keyword ではないため検査対象にしない
+                check_inline_schema(sub, what, f"{path}.properties.{prop}")
+        elif key == "items":
+            check_inline_schema(value, what, f"{path}.items")
+        elif key == "additionalProperties":
+            if isinstance(value, dict):
+                check_inline_schema(value, what, f"{path}.additionalProperties")
+    return schema
+
+
+def load_module_configuration(spec, mid):
+    """manifest の configuration 節の検証 (schema 安全性 + defaults の適合)"""
+    conf = spec.get("configuration")
+    if conf is None:
+        return None
+    schema = conf["schema"]
+    check_inline_schema(schema, mid)
+    if schema.get("type") != "object":
+        raise ResolveError(f"{mid}: configuration.schema の root は type: object であること")
+    if schema.get("additionalProperties") is not False:
+        raise ResolveError(
+            f"{mid}: configuration.schema は additionalProperties: false 必須"
+        )
+    try:
+        jsonschema.Draft202012Validator.check_schema(schema)
+    except jsonschema.SchemaError as e:
+        raise ResolveError(f"{mid}: configuration.schema が不正: {e.message}") from e
+    # defaults 自体も同じ schema で検証する (required の充足は解決後に検査
+    # するため、ここでは required を除いた schema で形だけ検証する)
+    shape_only = {k: v for k, v in schema.items() if k != "required"}
+    schema_validate(conf["defaults"], shape_only, f"{mid}: configuration.defaults")
+    return {"schema": schema, "defaults": conf["defaults"]}
+
+
+def merge_configuration(defaults, override, path="moduleConfiguration"):
+    """決定的な recursive merge。object 同士は再帰、scalar / array は
+    override が置換。null は schema が許すときだけ通常の値 (削除の意味にしない)"""
+    if isinstance(defaults, dict) and isinstance(override, dict):
+        merged = dict(defaults)
+        for k, v in override.items():
+            if k in merged:
+                merged[k] = merge_configuration(merged[k], v, f"{path}.{k}")
+            else:
+                merged[k] = v
+        return merged
+    return override
 
 
 def check_modules_root(workspace):
@@ -387,13 +476,57 @@ def compute_digests(plan):
     return plan
 
 
-def expected_secrets(module_ids):
-    """選択済み module 集合から期待される requiredSecrets (集中定義から導出)"""
-    return [
-        {"name": s["name"], "consumer": mid, "source": s["source"]}
-        for mid in module_ids
-        for s in BUILTIN_SECRETS.get(mid, [])
-    ]
+def derive_required_secrets(request, selected):
+    """manifest の secrets 宣言と BuildRequest.secretReferences を結合して
+    requiredSecrets を導出する。値は読まない (参照情報のみ)。
+    - 必須 secret に参照が無ければ失敗
+    - 未宣言の secret への参照、未選択 module への参照は失敗
+    - fileEnvironment は長さプレフィクス符号化で決定的に生成し、
+      実装事故に備えて全体の重複も検査する"""
+    selected_ids = {c["id"] for c in selected}
+    declared = {}  # (mid, sid) → 宣言
+    for c in selected:
+        for sid, decl in (c["spec"].get("secrets") or {}).items():
+            declared[(c["id"], sid)] = decl
+
+    refs = request["secretReferences"]
+    for mid, secrets in refs.items():
+        if mid not in selected_ids:
+            raise ResolveError(
+                f"secretReferences: 選択されていない module への参照: {mid}"
+            )
+        for sid in secrets:
+            if (mid, sid) not in declared:
+                raise ResolveError(
+                    f"secretReferences: module '{mid}' が宣言していない secret への参照: {sid}"
+                )
+
+    result = []
+    seen_env = {}
+    for (mid, sid), decl in sorted(declared.items()):
+        ref = (refs.get(mid) or {}).get(sid)
+        if ref is None:
+            if decl.get("required"):
+                raise ResolveError(
+                    f"module '{mid}' の必須 secret '{sid}' への参照が"
+                    " BuildRequest (config.yaml の secretReferences) に無い"
+                )
+            continue
+        env = secret_file_environment(mid, sid)
+        if env in seen_env:
+            raise ResolveError(
+                f"secret の環境変数名が衝突: {env} ({seen_env[env]} と {mid}/{sid})"
+            )
+        seen_env[env] = f"{mid}/{sid}"
+        result.append(
+            {
+                "id": sid,
+                "consumer": mid,
+                "source": dict(ref["source"]),
+                "fileEnvironment": env,
+            }
+        )
+    return result
 
 
 def resolve(workspace):
@@ -418,7 +551,11 @@ def resolve(workspace):
 
     # 7. filesystem input の検証は「最終的に選択された module」に対して行う
     # (将来 dependency 解決で module が追加されても、この段階が後段にある)
-    modules = [resolve_module(workspace, c["dir"], c["spec"]) for c in expanded]
+    modules = []
+    for c in expanded:
+        m = resolve_module(workspace, c["dir"], c["spec"])
+        m["config"] = c["config"]
+        modules.append(m)
 
     check_overlay_conflicts(workspace, modules)                  # 8
     modules = order_modules(modules)                             # 9
@@ -429,7 +566,7 @@ def resolve(workspace):
         "target": request["target"],
         "selection": {"mode": "all-builtin", "profile": None},
         "modules": modules,
-        "requiredSecrets": expected_secrets([m["id"] for m in modules]),
+        "requiredSecrets": derive_required_secrets(request, expanded),
         "digests": {},
     }
     compute_digests(plan)                                        # 10
@@ -444,8 +581,39 @@ def select_modules(request, candidates):
 
 
 def resolve_configuration(request, selected):
-    """5. configuration の解決 (MVP: 空)"""
-    return selected
+    """5. configuration の解決: module defaults ⊕ BuildRequest override →
+    schema 検証 → 解決済み config。個別 module へ再適用可能な純粋処理
+    (dependency で追加された module にも同じ処理を適用できる)"""
+    selected_ids = {c["id"] for c in selected}
+    for mid in request["moduleConfiguration"]:
+        if mid not in selected_ids:
+            raise ResolveError(
+                f"moduleConfiguration: 選択されていない (または存在しない) module: {mid}"
+            )
+    out = []
+    for c in selected:
+        out.append({**c, "config": resolve_module_config(request, c)})
+    return out
+
+
+def resolve_module_config(request, candidate):
+    """1 module 分の設定解決 (defaults → override merge → schema 検証)"""
+    mid = candidate["id"]
+    conf = load_module_configuration(candidate["spec"], mid)
+    override = request["moduleConfiguration"].get(mid)
+    if conf is None:
+        if override:
+            raise ResolveError(
+                f"moduleConfiguration: module '{mid}' は configuration を宣言していない"
+            )
+        return {}
+    merged = merge_configuration(conf["defaults"], override or {})
+    # canonical JSON として正規化し、入力 mapping の記述順に依存しない
+    merged = json.loads(
+        json.dumps(merged, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    )
+    schema_validate(merged, conf["schema"], f"{mid}: 解決済み configuration")
+    return merged
 
 
 def resolve_dependencies(configured):
@@ -508,10 +676,26 @@ def load_plan(workspace, plan_path):
             raise ResolveError(f"module[{m['id']}] の root がディレクトリとして存在しない")
         if not d.resolve(strict=True).is_relative_to(modules_root):
             raise ResolveError(f"module[{m['id']}] の root が modules/ の外を指している")
-    # requiredSecrets は選択済み module から期待される宣言 (集中定義) と
-    # 完全一致すること (注入先・取得元の改ざんを拒否)
-    if plan["requiredSecrets"] != expected_secrets([m["id"] for m in plan["modules"]]):
-        raise ResolveError("plan の requiredSecrets が組み込み定義と一致しない (改ざん)")
+    # config と requiredSecrets は workspace (manifest + config.yaml) から
+    # 再導出して完全一致すること (辻褄を合わせた改ざん plan による
+    # 設定・注入先・取得元の差し替えと、宣言変更後の stale plan を拒否)
+    request = load_build_request(workspace)
+    module_schema = load_schema(workspace, "module.schema.json")
+    pseudo_selected = []
+    for m in plan["modules"]:
+        spec = load_manifest(workspace, workspace / m["source"]["root"], module_schema)
+        pseudo_selected.append({"id": m["id"], "spec": spec})
+        expected_config = resolve_module_config(request, pseudo_selected[-1])
+        if m["config"] != expected_config:
+            raise ResolveError(
+                f"module[{m['id']}] の config が現在の宣言・BuildRequest から"
+                "導出される値と一致しない (改ざんまたは stale)\n\nrun: make resolve"
+            )
+    if plan["requiredSecrets"] != derive_required_secrets(request, pseudo_selected):
+        raise ResolveError(
+            "plan の requiredSecrets が現在の宣言・BuildRequest と一致しない"
+            " (改ざんまたは stale)\n\nrun: make resolve"
+        )
     return plan
 
 
@@ -637,8 +821,20 @@ def main():
     p.add_argument("--plan", required=True)
     p.add_argument("--kind", default="artifact", choices=["artifact", "tests", "plan"])
 
-    p = sub.add_parser("required-secrets", help="TSV (name, consumer, source) を出力する")
+    p = sub.add_parser(
+        "required-secrets",
+        help="TSV (id, consumer, source-env-name, fileEnvironment) を出力する")
     p.add_argument("--plan", required=True)
+
+    p = sub.add_parser("module-config",
+                       help="1 module の解決済み config (canonical JSON) を出力する")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--module", required=True)
+
+    p = sub.add_parser("write-configs",
+                       help="全 module の解決済み config を <dir>/<id>.json に書き出す")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--output-dir", required=True)
 
     p = sub.add_parser("write-sidecar", help="rootfs sidecar を生成する")
     p.add_argument("--plan", required=True)
@@ -691,7 +887,23 @@ def main():
             print(plan["digests"][args.kind])
         elif args.cmd == "required-secrets":
             for s in plan["requiredSecrets"]:
-                print(f"{s['name']}\t{s['consumer']}\t{s['source']}")
+                print(f"{s['id']}\t{s['consumer']}\t{s['source']['name']}"
+                      f"\t{s['fileEnvironment']}")
+        elif args.cmd == "module-config":
+            for m in plan["modules"]:
+                if m["id"] == args.module:
+                    print(json.dumps(m["config"], sort_keys=True,
+                                     separators=(",", ":"), ensure_ascii=False))
+                    break
+            else:
+                die(f"module が plan に無い: {args.module}")
+        elif args.cmd == "write-configs":
+            out_dir = Path(args.output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for m in plan["modules"]:
+                (out_dir / f"{m['id']}.json").write_text(
+                    json.dumps(m["config"], sort_keys=True,
+                               separators=(",", ":"), ensure_ascii=False) + "\n")
         elif args.cmd == "write-sidecar":
             write_sidecar(plan, args.rootfs, args.output)
         elif args.cmd == "verify-sidecar":

@@ -5,27 +5,59 @@
   "description": "out/meta/module-plan.json の構造検証。consumer は利用時に path の containment / type / mode / digest を再検証する (schema 通過 = 安全ではない)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["apiVersion", "kind", "target", "selection", "modules", "requiredSecrets", "digests"],
+  "required": [
+    "apiVersion",
+    "kind",
+    "target",
+    "selection",
+    "modules",
+    "requiredSecrets",
+    "digests"
+  ],
   "properties": {
-    "apiVersion": { "const": "e54c.image/v1alpha1" },
-    "kind": { "const": "ModulePlan" },
+    "apiVersion": {
+      "const": "e54c.image/v1alpha1"
+    },
+    "kind": {
+      "const": "ModulePlan"
+    },
     "target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["board", "architecture", "suite"],
+      "required": [
+        "board",
+        "architecture",
+        "suite"
+      ],
       "properties": {
-        "board": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
-        "architecture": { "type": "string", "pattern": "^[a-z0-9]+$" },
-        "suite": { "type": "string", "pattern": "^[a-z]+$" }
+        "board": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "architecture": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+$"
+        },
+        "suite": {
+          "type": "string",
+          "pattern": "^[a-z]+$"
+        }
       }
     },
     "selection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "profile"],
+      "required": [
+        "mode",
+        "profile"
+      ],
       "properties": {
-        "mode": { "const": "all-builtin" },
-        "profile": { "type": "null" }
+        "mode": {
+          "const": "all-builtin"
+        },
+        "profile": {
+          "type": "null"
+        }
       }
     },
     "modules": {
@@ -33,25 +65,54 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "source", "manifest", "packages", "overlays", "hooks", "tests", "config", "resolvedDependencies"],
+        "required": [
+          "id",
+          "source",
+          "manifest",
+          "packages",
+          "overlays",
+          "hooks",
+          "tests",
+          "config",
+          "resolvedDependencies"
+        ],
         "properties": {
-          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
           "source": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["type", "root"],
+            "required": [
+              "type",
+              "root"
+            ],
             "properties": {
-              "type": { "const": "builtin" },
-              "root": { "$ref": "#/$defs/relativePath" }
+              "type": {
+                "const": "builtin"
+              },
+              "root": {
+                "$ref": "#/$defs/relativePath"
+              }
             }
           },
-          "manifest": { "$ref": "#/$defs/fileRef" },
+          "manifest": {
+            "$ref": "#/$defs/fileRef"
+          },
           "packages": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["apt"],
+            "required": [
+              "apt"
+            ],
             "properties": {
-              "apt": { "type": "array", "items": { "type": "string" } }
+              "apt": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
           },
           "overlays": {
@@ -59,13 +120,23 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["source", "target", "entries"],
+              "required": [
+                "source",
+                "target",
+                "entries"
+              ],
               "properties": {
-                "source": { "$ref": "#/$defs/relativePath" },
-                "target": { "const": "/" },
+                "source": {
+                  "$ref": "#/$defs/relativePath"
+                },
+                "target": {
+                  "const": "/"
+                },
                 "entries": {
                   "type": "array",
-                  "items": { "$ref": "#/$defs/overlayEntry" }
+                  "items": {
+                    "$ref": "#/$defs/overlayEntry"
+                  }
                 }
               }
             }
@@ -74,20 +145,35 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "rootfs.customize": { "$ref": "#/$defs/execList" },
-              "rootfs.seal": { "$ref": "#/$defs/execList" }
+              "rootfs.customize": {
+                "$ref": "#/$defs/execList"
+              },
+              "rootfs.seal": {
+                "$ref": "#/$defs/execList"
+              }
             }
           },
           "tests": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "rootfs": { "$ref": "#/$defs/execList" },
-              "boot": { "$ref": "#/$defs/execList" }
+              "rootfs": {
+                "$ref": "#/$defs/execList"
+              },
+              "boot": {
+                "$ref": "#/$defs/execList"
+              }
             }
           },
-          "config": { "type": "object" },
-          "resolvedDependencies": { "type": "array", "items": { "type": "string" } }
+          "config": {
+            "type": "object"
+          },
+          "resolvedDependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -96,22 +182,63 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "consumer", "source"],
+        "required": [
+          "id",
+          "consumer",
+          "source",
+          "fileEnvironment"
+        ],
         "properties": {
-          "name": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
-          "consumer": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
-          "source": { "const": "environment" }
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "consumer": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "name"
+            ],
+            "properties": {
+              "type": {
+                "const": "environment"
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              }
+            }
+          },
+          "fileEnvironment": {
+            "type": "string",
+            "pattern": "^E54C_SECRET_FILE_[A-Z0-9_]+$"
+          }
         }
       }
     },
     "digests": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["artifact", "tests", "plan"],
+      "required": [
+        "artifact",
+        "tests",
+        "plan"
+      ],
       "properties": {
-        "artifact": { "$ref": "#/$defs/sha256" },
-        "tests": { "$ref": "#/$defs/sha256" },
-        "plan": { "$ref": "#/$defs/sha256" }
+        "artifact": {
+          "$ref": "#/$defs/sha256"
+        },
+        "tests": {
+          "$ref": "#/$defs/sha256"
+        },
+        "plan": {
+          "$ref": "#/$defs/sha256"
+        }
       }
     }
   },
@@ -121,15 +248,28 @@
       "minLength": 1,
       "pattern": "^(?!/)(?!.*(^|/)\\.\\.?(/|$))[^\\u0000\\r\\n]+$"
     },
-    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "mode": {
+      "type": "string",
+      "pattern": "^0[0-7]{3}$"
+    },
     "fileRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256"],
+      "required": [
+        "path",
+        "sha256"
+      ],
       "properties": {
-        "path": { "$ref": "#/$defs/relativePath" },
-        "sha256": { "$ref": "#/$defs/sha256" }
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "execList": {
@@ -137,24 +277,51 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "mode", "sha256"],
+        "required": [
+          "path",
+          "mode",
+          "sha256"
+        ],
         "properties": {
-          "path": { "$ref": "#/$defs/relativePath" },
-          "mode": { "$ref": "#/$defs/mode" },
-          "sha256": { "$ref": "#/$defs/sha256" }
+          "path": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "mode": {
+            "$ref": "#/$defs/mode"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
         }
       }
     },
     "overlayEntry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "type"],
+      "required": [
+        "path",
+        "type"
+      ],
       "properties": {
-        "path": { "$ref": "#/$defs/relativePath" },
-        "type": { "enum": ["file", "dir", "symlink"] },
-        "mode": { "$ref": "#/$defs/mode" },
-        "sha256": { "$ref": "#/$defs/sha256" },
-        "linkTarget": { "type": "string" }
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "type": {
+          "enum": [
+            "file",
+            "dir",
+            "symlink"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/mode"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "linkTarget": {
+          "type": "string"
+        }
       }
     }
   }
