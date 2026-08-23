@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shao1555/radxa-e54c-debian-imagebuilder/schemas/module-plan.schema.json",
+  "title": "ModulePlan (e54c.image/v1alpha1)",
+  "description": "out/meta/module-plan.json の構造検証。consumer は利用時に path の containment / type / mode / digest を再検証する (schema 通過 = 安全ではない)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "target", "selection", "modules", "requiredSecrets", "digests"],
+  "properties": {
+    "apiVersion": { "const": "e54c.image/v1alpha1" },
+    "kind": { "const": "ModulePlan" },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["board", "architecture", "suite"],
+      "properties": {
+        "board": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "architecture": { "type": "string", "pattern": "^[a-z0-9]+$" },
+        "suite": { "type": "string", "pattern": "^[a-z]+$" }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "profile"],
+      "properties": {
+        "mode": { "const": "all-builtin" },
+        "profile": { "type": "null" }
+      }
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "source", "manifest", "packages", "overlays", "hooks", "tests", "config", "resolvedDependencies"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "root"],
+            "properties": {
+              "type": { "const": "builtin" },
+              "root": { "$ref": "#/$defs/relativePath" }
+            }
+          },
+          "manifest": { "$ref": "#/$defs/fileRef" },
+          "packages": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["apt"],
+            "properties": {
+              "apt": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "overlays": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "target", "entries"],
+              "properties": {
+                "source": { "$ref": "#/$defs/relativePath" },
+                "target": { "const": "/" },
+                "entries": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/overlayEntry" }
+                }
+              }
+            }
+          },
+          "hooks": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "rootfs.customize": { "$ref": "#/$defs/execList" },
+              "rootfs.seal": { "$ref": "#/$defs/execList" }
+            }
+          },
+          "tests": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "rootfs": { "$ref": "#/$defs/execList" },
+              "boot": { "$ref": "#/$defs/execList" }
+            }
+          },
+          "config": { "type": "object" },
+          "resolvedDependencies": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "requiredSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "consumer", "source"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "consumer": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+          "source": { "const": "environment" }
+        }
+      }
+    },
+    "digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "tests", "plan"],
+      "properties": {
+        "artifact": { "$ref": "#/$defs/sha256" },
+        "tests": { "$ref": "#/$defs/sha256" },
+        "plan": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.?(/|$))[^\\u0000\\r\\n]+$"
+    },
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+    "fileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "execList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "mode", "sha256"],
+        "properties": {
+          "path": { "$ref": "#/$defs/relativePath" },
+          "mode": { "$ref": "#/$defs/mode" },
+          "sha256": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    },
+    "overlayEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "type"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "type": { "enum": ["file", "dir", "symlink"] },
+        "mode": { "$ref": "#/$defs/mode" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "linkTarget": { "type": "string" }
+      }
+    }
+  }
+}

@@ -13,8 +13,19 @@ export LIBGUESTFS_BACKEND=direct
 
 cd "$(dirname "$0")/.."
 TOP="$PWD"
+PLAN="$TOP/out/meta/module-plan.json"
+if [[ "${1:-}" == "--plan" ]]; then
+	PLAN="$2"
+	shift 2
+fi
 ROOTFS="$TOP/out/rootfs/build/rootfs.tar"
 [[ -f $ROOTFS ]] || { echo "rootfs.tar が無い。先に build-rootfs.sh を実行" >&2; exit 1; }
+[[ -f $PLAN ]] || { echo "エラー: module-plan が無い: $PLAN (make resolve)" >&2; exit 1; }
+
+# rootfs が現在の plan の module 入力から作られたこと + tar 実体の整合を検証する
+# (image job は module source を実行しないため、path/content の再検証は不要)
+python3 scripts/resolve-modules.py verify-sidecar --plan "$PLAN" \
+	--rootfs "$ROOTFS" --sidecar "$TOP/out/rootfs/build/rootfs.meta.json"
 
 name="$(python3 -c "import yaml;print(yaml.safe_load(open('config.yaml'))['image']['name'])")"
 suite="$(python3 -c "import yaml;print(yaml.safe_load(open('config.yaml'))['debian']['suite'])")"

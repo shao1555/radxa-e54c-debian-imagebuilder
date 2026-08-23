@@ -12,6 +12,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 TOP="$PWD"
 
+PLAN="$TOP/out/meta/module-plan.json"
+if [[ "${1:-}" == "--plan" ]]; then
+	PLAN="$2"
+	shift 2
+fi
+[[ -f $PLAN ]] || { echo "エラー: module-plan が無い: $PLAN (make resolve)" >&2; exit 1; }
+
 # 入力: 引数 or out/ の最新 .img.xz
 IMG_XZ="${1:-$(ls -t "$TOP"/out/*.img.xz 2> /dev/null | head -1)}"
 [[ -f ${IMG_XZ:-} ]] || { echo "エラー: イメージ (.img.xz) が無い。先に make image" >&2; exit 1; }
@@ -72,20 +79,19 @@ mkdir -p "$BUNDLE/modules"
 cp "$TOP/scripts/boot-test-lib.sh" "$BUNDLE/test-lib.sh"
 cp "$TOP/scripts/boot-check.sh" "$BUNDLE/core.sh"
 cp "$TOP/scripts/boot-test-run.sh" "$BUNDLE/run.sh"
-# process substitution だと resolver の失敗が while に伝播しないため、
-# 先に変数へ受けて set -e で止まるようにする (rootfs runner と同じ理由)。
+# modules/ は再探索しない: plan に記載された boot test だけを bundle に入れる。
+# list-tests は出力前に containment / type / mode / digest を再検証する
+# (stale / 改ざん plan なら失敗)。変数受けで失敗を set -e に伝播させる。
 # コピー名は宣言順の連番を前置し、同名 basename の test が上書きされて
 # 実行漏れになるのを防ぐ (dispatcher は名前の辞書順で実行する)
-module_boot_tests="$(python3 "$TOP/scripts/resolve-modules.py" --json | python3 -c "
-import json, sys
-for m in json.load(sys.stdin):
-    for i, t in enumerate(m['tests'].get('boot', [])):
-        print(f\"{m['id']}\t{i:02d}\t{t}\")")"
+module_boot_tests="$(python3 "$TOP/scripts/resolve-modules.py" list-tests \
+	--plan "$PLAN" --phase boot | awk -F'\t' '
+	{ if ($1 != prev) { i = 0; prev = $1 }; printf "%s\t%02d\t%s\n", $1, i++, $2 }')"
 while IFS=$'\t' read -r mid idx t; do
 	[[ -n $mid ]] || continue
-	echo "module[$mid] boot test: ${t#"$TOP"/}"
+	echo "module[$mid] boot test: $t"
 	mkdir -p "$BUNDLE/modules/$mid"
-	cp "$t" "$BUNDLE/modules/$mid/${idx}-$(basename "$t")"
+	cp "$TOP/$t" "$BUNDLE/modules/$mid/${idx}-$(basename "$t")"
 done <<< "$module_boot_tests"
 tar -cf "$WORK/boot-tests.tar" -C "$BUNDLE" .
 

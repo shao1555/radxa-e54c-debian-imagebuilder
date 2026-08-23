@@ -112,8 +112,11 @@ hook が参照できる環境変数は、契約に明記されたものだけで
 - `DEFAULT_PASSWORD` は `default-user` が解決対象に含まれる場合だけ
   build-rootfs.sh が必須検証する (モジュールを外せば framework は要求しない)
 - 値は環境にグローバル export されない。builder が 0600 の一時ファイルに保持し、
-  `default-user` の hook 起動時にだけ環境変数として注入する
-  (他モジュールの hook の環境には現れない)
+  consumer module の hook 起動時にだけ環境変数として注入する。
+  **注意**: 値そのものは他モジュールの hook 環境に現れないが、secret ファイル
+  パスの capability は同一ビルド内の全 hook が読める。MVP では組み込み
+  モジュールを単一の trust domain として許容しており、外部モジュール対応前に
+  per-hook の隔離 (sanitized environment / read-only staging / sandbox) を設計する
 - 値をログ、生成 YAML (bdebstrap.yaml)、`resolved-modules.yaml` に出力しない
 - 外部モジュール導入時には、モジュールごとの入力宣言と環境の sanitize を
   別途設計する (それまで新しい環境変数契約は追加しない)
@@ -178,10 +181,35 @@ bundle (tar) にまとめてシリアル経由で 1 回だけ転送し、dispatc
 - ホスト側からの実 SSH ログイン検査は core harness (expect) が担当する
   (module テストの host-side phase は将来の Issue)
 
+## canonical ModulePlan (Issue #14)
+
+ビルドごとに Resolver が `out/meta/module-plan.json` を一度だけ生成し、
+build / test / Release の全 consumer はこの plan だけを参照する
+(modules/ の再探索・再解決はしない)。
+
+- plan は workspace 相対 path と content digest (sha256) を持ち、
+  absolute path / timestamp / secret 値を含まない (byte-identical に再生成できる)
+- consumer は plan を**自プロセス内で** load (schema・digest 再検算・root /
+  requiredSecrets 検証) し、利用する path の module-root containment / type /
+  mode / digest を利用直前に再検証する
+  (「Resolver が生成した plan だから安全」とは仮定しない)。
+  不一致は `module plan is stale` として拒否され、`make resolve` で再生成する
+- **plan の真正性の範囲**: 自己 digest は破損・不整合な変更を検出するが、
+  digest ごと再計算できる作成者に対する「署名」ではない。ModulePlan は
+  CI artifact など信頼できる経路で受け渡される権威ある解決結果として扱い、
+  その中の path は常に未信頼入力として上記の再検証を行う。悪意ある plan の
+  置き換え自体を拒否する必要が生じた場合は、署名 / provenance 検証または
+  再解決を導入する (外部モジュール対応時に扱う)
+- digest は 3 種: `artifact` (rootfs へ影響する入力)、`tests`、`plan`。
+  test のみの変更では artifact digest が変わらず、rootfs cache を再利用できる
+- rootfs.tar には sidecar (`rootfs.meta.json`) が付き、smoke test / image build が
+  plan の artifact digest と tar 実体の sha256 を照合する
+- 構造は `schemas/module.schema.json` / `schemas/module-plan.schema.json` が定義する
+
 ## provenance
 
-ビルドごとに有効化したモジュール一覧が `out/meta/resolved-modules.yaml` に
-生成され、Release に同梱される。
+ビルドごとに有効化したモジュール一覧が `out/meta/resolved-modules.yaml` として
+plan から導出され、`module-plan.json` とともに Release に同梱される。
 
 ```yaml
 apiVersion: e54c.image/v1alpha1
@@ -196,6 +224,9 @@ modules:
 - profile の定義・継承・設定上書き、module の enable/disable
 - module 間の `requires` / `conflicts` / capability
 - 外部 GitHub/Git/OCI module の取得、module lock file と署名検証
-- 解決結果 (module plan) の一回生成と全 consumer での共有
-- JSON Schema による厳密検証 (`additionalProperties: false`)
+- secret を含む構成でのキャッシュ identity (profile で初期パスワード等を
+  変更可能にする際、非キャッシュ化 / keyed fingerprint / base rootfs と
+  personalization の分離のいずれかを決める。secret の素の SHA256 を公開
+  plan や cache key に入れない)
+- per-hook の secret 隔離 (現在は組み込みモジュールを単一 trust domain とする)
 - first-boot runner / hardware test runner

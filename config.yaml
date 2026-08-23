@@ -1,5 +1,11 @@
 # e54c-server-imagebuilder の宣言的設定
-# ここと packages.txt / files/ / kernel/ だけを編集すれば済むのが設計目標。
+# ここと packages.txt / modules/ / kernel/ だけを編集すれば済むのが設計目標。
+
+# ターゲットの identity (ModulePlan の target になる。image.name は出力名、
+# kernel.dtb は boot asset であり、board identity の代用にはしない)
+target:
+  board: radxa-e54c
+  architecture: arm64
 
 image:
   name: e54c-server        # 出力: <name>_<suite>_<version>.img.xz

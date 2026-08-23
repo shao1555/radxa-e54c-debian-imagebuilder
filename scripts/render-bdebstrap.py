@@ -18,25 +18,47 @@ module rootfs.customize は boot finalize より前 (initramfs / extlinux に影
 変更を反映できる位置)。core final seal は必ずモジュールより後に実行する
 (モジュールが core の封印処理後に成果物を書き戻せない順序にするため)。
 """
-import json
-import subprocess
+import argparse
 import sys
 import yaml
 from pathlib import Path
 
-TOP = Path(__file__).resolve().parent.parent
-cfg = yaml.safe_load((TOP / "config.yaml").read_text())
-out_dir = Path(sys.argv[1]).resolve()  # 例: out/rootfs
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import module_plan  # noqa: E402
 
-# モジュールの解決 (検証込み。不正があればここで fail-fast する)
-modules = json.loads(
-    subprocess.run(
-        [sys.executable, str(TOP / "scripts" / "resolve-modules.py"), "--json"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-)
+TOP = Path(__file__).resolve().parent.parent
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--plan", required=True, help="module-plan.json (resolve 済み)")
+ap.add_argument("out_dir")
+args = ap.parse_args()
+out_dir = Path(args.out_dir).resolve()  # 例: out/rootfs
+
+cfg = yaml.safe_load((TOP / "config.yaml").read_text())
+
+# モジュールは plan だけを参照する (再探索・再解決はしない)。
+# 検証は別プロセスに依存せず、この consumer 自身が同一プロセス内で行う:
+# load_plan (schema / digest 再検算 / root・requiredSecrets 検証) と、
+# 利用する入力 (hooks / overlays / manifest) の containment・type・mode・digest
+try:
+    plan = module_plan.load_plan(TOP, args.plan)
+    module_plan.verify_inputs(TOP, plan, "hooks")
+except module_plan.ResolveError as e:
+    print(f"render-bdebstrap: エラー: {e}", file=sys.stderr)
+    sys.exit(1)
+modules = plan["modules"]
+# plan の path は workspace 相対 → 絶対化して bdebstrap.yaml に配線する
+for m in modules:
+    m["_overlay_dirs"] = [str(TOP / ov["source"]) for ov in m["overlays"]]
+    m["_hooks"] = {
+        phase: [str(TOP / ref["path"]) for ref in refs]
+        for phase, refs in m["hooks"].items()
+    }
+# requiredSecrets: consumer module の hook 起動行にだけ secret を環境注入する
+# (docs/modules.md の限定契約。値は $E54C_SECRET_FILE_<NAME> のファイルから読む)
+secrets_by_consumer = {}
+for s in plan["requiredSecrets"]:
+    secrets_by_consumer.setdefault(s["consumer"], []).append(s["name"])
 
 packages = []
 for line in (TOP / "packages.txt").read_text().splitlines():
@@ -46,7 +68,11 @@ for line in (TOP / "packages.txt").read_text().splitlines():
 
 deb = cfg["debian"]
 ub = cfg["uboot"]
-suite = deb["suite"]
+# target identity (suite / architecture) は plan を実行時の正とする
+# (別 BuildRequest から生成した plan でも、plan の target どおりの rootfs が
+#  その artifact digest で記録されるように)
+suite = plan["target"]["suite"]
+architecture = plan["target"]["architecture"]
 components = " ".join(deb["components"])
 
 # ビルド時のパッケージ解決は dependencies.lock.yaml の snapshot に固定する。
@@ -63,16 +89,16 @@ live_sec = live_main.rsplit("/", 1)[0] + "/debian-security"
 
 def module_hook_cmd(m, h):
     """module hook の起動行を生成する。
-    secret input (DEFAULT_PASSWORD) は契約どおり組み込み default-user の hook に
-    だけ環境注入する。値は環境にグローバル export されず、build-rootfs.sh が
-    用意する 0600 の一時ファイル (パスのみ $E54C_DEFAULT_PASSWORD_FILE で伝わる)
-    から hook 起動時に読む。生成 YAML に値もパスも埋め込まれない"""
-    if m["id"] == "default-user":
-        return (
-            'DEFAULT_PASSWORD="$(cat "$E54C_DEFAULT_PASSWORD_FILE")" '
-            f'"{h}" "$1"'
-        )
-    return f'"{h}" "$1"'
+    secret input は plan の requiredSecrets に従い、consumer module の hook に
+    だけ環境注入する (module ID の特別扱いはしない)。値は環境にグローバル
+    export されず、build-rootfs.sh が用意する 0600 の一時ファイル (パスのみ
+    $E54C_SECRET_FILE_<NAME> で伝わる) から hook 起動時に読む。
+    生成 YAML に値もパスも埋め込まれない"""
+    prefix = "".join(
+        f'{name}="$(cat "$E54C_SECRET_FILE_{name}")" '
+        for name in secrets_by_consumer.get(m["id"], [])
+    )
+    return f'{prefix}"{h}" "$1"'
 
 
 customize_hooks = [
@@ -114,7 +140,7 @@ customize_hooks = [
     # core / module overlay をそのまま重ねる (同一フェーズで適用する。
     # 同一パスへの配置は resolve-modules.py が build 前に競合として拒否済み)
     f'if [ -d "{TOP}/files" ]; then cp -a "{TOP}/files/." "$1/"; fi',
-    *[f'cp -a "{ov}/." "$1/"' for m in modules for ov in m["overlays"]],
+    *[f'cp -a "{ov}/." "$1/"' for m in modules for ov in m["_overlay_dirs"]],
     # hostname
     f'echo "{cfg["image"]["hostname"]}" > "$1/etc/hostname"',
     f'echo "127.0.1.1\t{cfg["image"]["hostname"]}" >> "$1/etc/hosts"',
@@ -141,7 +167,7 @@ customize_hooks = [
     *[
         module_hook_cmd(m, h)
         for m in modules
-        for h in m["hooks"].get("rootfs.customize", [])
+        for h in m["_hooks"].get("rootfs.customize", [])
     ],
     # --- framework boot finalize (initramfs → extlinux の順を固定) ---
     # カーネル導入後の起動整備。initramfs を先に確定させてから extlinux.conf を
@@ -161,12 +187,12 @@ customize_hooks = [
 # core final seal (machine-id / apt 設定 / sources 書き戻し等の framework
 # invariant) は必ずモジュールより後 (モジュールが封印後の成果物を書き戻せない)
 module_seal_hooks = [
-    module_hook_cmd(m, h) for m in modules for h in m["hooks"].get("rootfs.seal", [])
+    module_hook_cmd(m, h) for m in modules for h in m["_hooks"].get("rootfs.seal", [])
 ]
 
 config = {
     "mmdebstrap": {
-        "architectures": ["arm64"],
+        "architectures": [architecture],
         "suite": suite,
         "target": "rootfs.tar",
         "mode": "root",
@@ -188,8 +214,8 @@ config = {
             # radxa の keyring / U-Boot は apt 解決しない (dependencies.lock.yaml
             # で固定した deb を customize hook が dpkg で投入する)
             *packages,
-            # モジュールが宣言するパッケージ (modules/*/module.yaml の packages.apt)
-            *(p for m in modules for p in m["packages"]),
+            # モジュールが宣言するパッケージ (plan の modules[].packages.apt)
+            *(p for m in modules for p in m["packages"]["apt"]),
         ],
         "customize-hooks": customize_hooks,
         "cleanup-hooks": [

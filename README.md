@@ -49,8 +49,10 @@ npm exec -- @devcontainers/cli exec --workspace-folder . make
 ```
 1. scripts/build-kernel.sh   kernel.org から取得 (lock の SHA256 検証)
                              → patches/dts/config 適用 → linux-image/headers の deb 生成
-2. scripts/build-rootfs.sh   modules/ を解決・検証 → config.yaml + packages.txt +
-                             modules/*/module.yaml → bdebstrap 設定を生成
+2. make resolve              canonical ModulePlan (out/meta/module-plan.json) を
+                             pipeline ごとに一度だけ生成 (CI は rootfs job 前段)
+   scripts/build-rootfs.sh   plan を検証して参照 → config.yaml + packages.txt +
+                             plan から bdebstrap 設定を生成 (全 consumer が同じ plan)
                              → mmdebstrap で Debian rootfs 構築 (snapshot 固定)
                              → 自前カーネル deb + Radxa deb (lock 検証済み) 投入
                              → core/module overlay → legacy hooks
