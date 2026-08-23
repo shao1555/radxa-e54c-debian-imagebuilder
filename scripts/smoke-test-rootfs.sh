@@ -87,6 +87,9 @@ else
 	echo "NG: debian が sudo グループに所属していない"
 	fail=1
 fi
+# login(1): trixie では Essential でないため variant=apt に含まれず、
+# 欠けるとシリアルコンソールからログイン不能になる (QEMU ブートテストで検出)
+check "login バイナリ (シリアルログインに必要)" '^-rwx.* \./usr/bin/login$'
 check "resolv.conf が resolved の stub へ symlink" \
 	'^l.* \./etc/resolv\.conf -> \.\./run/systemd/resolve/stub-resolv\.conf$'
 check_absent "ビルドホスト DNS の漏洩 (.resolv.conf.systemd-resolved.bak)" \
@@ -118,6 +121,11 @@ check "U-Boot 書き込みスクリプト (実行可)" '^-rwx.* \./usr/lib/u-boo
 check "incus (実行可)"                     '^-rwx.* \./usr/bin/incus$'
 check "k3s バイナリ (実行可)"              '^-rwx.* \./usr/local/bin/k3s$'
 check "k3s の systemd unit"                '^-.* \./etc/systemd/system/k3s\.service$'
+# k3s は「既定では無効」。初回ブートの preset-all (Debian 既定 enable *) が
+# 勝手に enable して restart ループする回帰を踏んだため、preset ファイルで固定する
+check "k3s を disable する preset"         '^-.* \./etc/systemd/system-preset/50-e54c\.preset$'
+check_absent "k3s が enable されていない" \
+	'\./etc/systemd/system/multi-user\.target\.wants/k3s\.service'
 
 # AppArmor: カーネル側の有効化だけでは不十分で、apparmor_parser が無いと
 # incus が AppArmor サポートを無効化する
