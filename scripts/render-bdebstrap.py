@@ -19,10 +19,12 @@ module rootfs.customize は boot finalize より前 (initramfs / extlinux に影
 (モジュールが core の封印処理後に成果物を書き戻せない順序にするため)。
 """
 import argparse
-import json
 import sys
 import yaml
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import module_plan  # noqa: E402
 
 TOP = Path(__file__).resolve().parent.parent
 
@@ -34,9 +36,16 @@ out_dir = Path(args.out_dir).resolve()  # 例: out/rootfs
 
 cfg = yaml.safe_load((TOP / "config.yaml").read_text())
 
-# モジュールは plan だけを参照する (再探索・再解決はしない。plan 記載入力の
-# containment / digest 再検証は build-rootfs.sh が直前に verify-inputs で行う)
-plan = json.loads(Path(args.plan).read_text())
+# モジュールは plan だけを参照する (再探索・再解決はしない)。
+# 検証は別プロセスに依存せず、この consumer 自身が同一プロセス内で行う:
+# load_plan (schema / digest 再検算 / root・requiredSecrets 検証) と、
+# 利用する入力 (hooks / overlays / manifest) の containment・type・mode・digest
+try:
+    plan = module_plan.load_plan(TOP, args.plan)
+    module_plan.verify_inputs(TOP, plan, "hooks")
+except module_plan.ResolveError as e:
+    print(f"render-bdebstrap: エラー: {e}", file=sys.stderr)
+    sys.exit(1)
 modules = plan["modules"]
 # plan の path は workspace 相対 → 絶対化して bdebstrap.yaml に配線する
 for m in modules:

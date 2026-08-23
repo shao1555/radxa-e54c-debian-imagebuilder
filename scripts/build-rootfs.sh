@@ -56,15 +56,15 @@ echo "kernel deb preflight passed: $(basename "$img_deb")"
 scripts/verify-build-env.sh
 
 # canonical ModulePlan は make resolve (または CI の resolve ステップ) が
-# pipeline ごとに一度だけ生成する。ここでは再生成せず、既存 plan を必須として
-# 利用直前の入力再検証 (containment / type / mode / digest) だけを行う
+# pipeline ごとに一度だけ生成する。ここでは再生成しない。
+# 入力の再検証は各 consumer が自プロセス内で行う (render-bdebstrap.py が
+# load_plan + verify を実行し、required-secrets 等の CLI も load 時に検証する)
 PLAN="$TOP/out/meta/module-plan.json"
 if [[ "${1:-}" == "--plan" ]]; then
 	PLAN="$2"
 	shift 2
 fi
 [[ -f $PLAN ]] || { echo "エラー: module-plan が無い: $PLAN (make resolve)" >&2; exit 1; }
-python3 scripts/resolve-modules.py verify-inputs --plan "$PLAN" --phase all
 
 # secret input の汎用処理 (plan の requiredSecrets を処理する。module ID の
 # 特別扱いはしない)。値は環境にグローバル export せず、0600 の一時ファイルに

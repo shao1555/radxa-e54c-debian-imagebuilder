@@ -18,12 +18,9 @@ from pathlib import Path
 TOP = Path(__file__).resolve().parent.parent.parent
 RESOLVER = TOP / "scripts" / "resolve-modules.py"
 
-# digest の辻褄合わせに resolver の純粋関数を使う (改ざんテスト用)
-import importlib.util as _ilu
-
-_spec = _ilu.spec_from_file_location("resolver_mod", RESOLVER)
-resolver_mod = _ilu.module_from_spec(_spec)
-_spec.loader.exec_module(resolver_mod)
+# digest の辻褄合わせにライブラリの純粋関数を使う (改ざんテスト用)
+sys.path.insert(0, str(TOP / "scripts"))
+import module_plan as resolver_mod  # noqa: E402
 
 
 def make_workspace(tmp):
@@ -309,6 +306,19 @@ class ResolverTest(unittest.TestCase):
         r = self.verify(path)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("requiredSecrets", r.stderr)
+
+    def test_modules_dir_symlink_rejected(self):
+        # modules/ 自体を workspace 外への symlink に置換 → resolve も load も拒否
+        _, path = self.plan()
+        real = Path(self.tmp) / "outside-modules"
+        shutil.move(str(self.ws / "modules"), str(real))
+        os.symlink(real, self.ws / "modules")
+        r, _ = resolve(self.ws)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("symlink", r.stderr)
+        r = self.verify(path)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("symlink", r.stderr)
 
     def test_overlay_source_tamper_to_other_module_rejected(self):
         _, path = self.plan()
