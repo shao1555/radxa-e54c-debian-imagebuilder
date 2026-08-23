@@ -147,7 +147,12 @@ if command -v ccache > /dev/null; then
 	MAKE_CC=(CC="ccache ${CROSS_COMPILE:-}gcc")
 	ccache -z > /dev/null || true
 fi
+# KBUILD_IMAGE: arm64 の既定は Image.gz だが、U-Boot での gzip 展開は
+# kernel_comp_addr_r 等の env 設定が必要で、実機の vendor U-Boot 2017.09 は
+# そもそも booti の gzip 展開に未対応 (QEMU ブートテストで検出)。
+# Debian/Radxa と同様に非圧縮 Image を vmlinuz として収録する
 make -j"$(nproc)" LOCALVERSION="$localver" KDEB_PKGVERSION="${ver//-/\~}${localver}-1" \
+	KBUILD_IMAGE=arch/arm64/boot/Image \
 	"${MAKE_CC[@]}" bindeb-pkg
 command -v ccache > /dev/null && ccache -s | head -5 || true
 # 今回のビルドが期待どおりの成果物を出したことを確認してから out/debs を置換する
