@@ -48,22 +48,34 @@ jobs:
           tag="$(TZ=Asia/Tokyo date +%Y%m%d)-${hash:0:12}-${{ runner.arch }}"
           echo "image=${DEVCONTAINER_IMAGE}:${tag}" >> "$GITHUB_OUTPUT"
 
+      # seed (linux-config パッケージのバージョン) はイメージの LABEL に焼き込む。
+      # 既存イメージの経路では imagetools inspect が manifest + config blob (数 KB)
+      # だけを読むため、レイヤーの pull は発生しない (= キャッシュヒット時の
+      # workflow 全体が高速のまま)。LABEL の無い過去イメージには docker run で
+      # フォールバックする (1 回だけ pull が走り、翌日のローテで自然に解消)
       - name: Build and push if missing
+        id: seed
         run: |
           img="${{ steps.tag.outputs.image }}"
           if docker manifest inspect "$img" > /dev/null 2>&1; then
             echo "==> $img exists, skipping build"
+            seed="$(docker buildx imagetools inspect "$img" \
+              --format '{{ index .Image.Config.Labels "e54c.kernel-config-seed" }}')"
+            if [[ -z $seed ]]; then
+              echo "==> no seed label (old image), falling back to docker run"
+              seed="$(docker run --rm "$img" \
+                dpkg-query -W -f '${Package}=${Version}' 'linux-config-*')"
+            fi
           else
             docker build -t "$img" .devcontainer/
+            seed="$(docker run --rm "$img" \
+              dpkg-query -W -f '${Package}=${Version}' 'linux-config-*')"
+            # レイヤーは全てキャッシュ済みのため、LABEL 付け直しは数秒で終わる
+            docker build --label "e54c.kernel-config-seed=$seed" -t "$img" .devcontainer/
             docker push "$img"
           fi
-
-      - name: Extract kernel config seed version
-        id: seed
-        run: |
-          img="${{ steps.tag.outputs.image }}"
-          echo "seed=$(docker run --rm "$img" \
-            dpkg-query -W -f '${Package}=${Version}' 'linux-config-*')" >> "$GITHUB_OUTPUT"
+          [[ -n $seed ]] || { echo "エラー: seed バージョンを取得できない" >&2; exit 1; }
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
 
   # ステージ 1: カーネル deb。入力が変わらなければキャッシュ復元だけで数秒
   kernel:
