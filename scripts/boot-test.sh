@@ -64,4 +64,29 @@ fi
 # 3. 容量拡張の検証: +2GiB してからブートし、ゲスト内で拡張結果を確認する
 qemu-img resize -f raw "$IMG" +2G
 
-expect "$TOP/scripts/boot-test.expect" "$IMG" "$TOP/scripts/boot-check.sh" "$SSH_PORT"
+# --- boot テスト bundle の組み立て (Issue #7) ---
+# core 検査 + モジュールの boot テスト + 共通 lib + dispatcher を 1 つの tar に
+# まとめ、シリアル転送は 1 回のまま各テストを独立プロセスで実行する
+BUNDLE="$WORK/boot-tests"
+mkdir -p "$BUNDLE/modules"
+cp "$TOP/scripts/boot-test-lib.sh" "$BUNDLE/test-lib.sh"
+cp "$TOP/scripts/boot-check.sh" "$BUNDLE/core.sh"
+cp "$TOP/scripts/boot-test-run.sh" "$BUNDLE/run.sh"
+# process substitution だと resolver の失敗が while に伝播しないため、
+# 先に変数へ受けて set -e で止まるようにする (rootfs runner と同じ理由)。
+# コピー名は宣言順の連番を前置し、同名 basename の test が上書きされて
+# 実行漏れになるのを防ぐ (dispatcher は名前の辞書順で実行する)
+module_boot_tests="$(python3 "$TOP/scripts/resolve-modules.py" --json | python3 -c "
+import json, sys
+for m in json.load(sys.stdin):
+    for i, t in enumerate(m['tests'].get('boot', [])):
+        print(f\"{m['id']}\t{i:02d}\t{t}\")")"
+while IFS=$'\t' read -r mid idx t; do
+	[[ -n $mid ]] || continue
+	echo "module[$mid] boot test: ${t#"$TOP"/}"
+	mkdir -p "$BUNDLE/modules/$mid"
+	cp "$t" "$BUNDLE/modules/$mid/${idx}-$(basename "$t")"
+done <<< "$module_boot_tests"
+tar -cf "$WORK/boot-tests.tar" -C "$BUNDLE" .
+
+expect "$TOP/scripts/boot-test.expect" "$IMG" "$WORK/boot-tests.tar" "$SSH_PORT"

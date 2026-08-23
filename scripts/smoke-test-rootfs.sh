@@ -7,57 +7,28 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+TOP="$PWD"
 TAR="${1:-out/rootfs/build/rootfs.tar}"
 [[ -f $TAR ]] || { echo "NG: rootfs.tar が無い: $TAR" >&2; exit 1; }
 
-listing="$(tar -tvf "$TAR")"
-fail=0
-
-check() { # <説明> <grep -E パターン>
-	if grep -qE "$2" <<< "$listing"; then
-		echo "ok: $1"
-	else
-		echo "NG: $1 (pattern: $2)"
-		fail=1
-	fi
-}
-
-check_absent() { # <説明> <grep -E パターン>
-	if grep -qE "$2" <<< "$listing"; then
-		echo "NG: $1 (存在してはいけない)"
-		fail=1
-	else
-		echo "ok: $1"
-	fi
-}
+# 共通 helper (check / check_absent / enabled / tar_cat) と、モジュールテストへの
+# 受け渡し (Issue #7 の契約)。listing は一度だけ生成して共有する
+LISTING_TMP="$(mktemp)"
+trap 'rm -f "$LISTING_TMP"' EXIT
+tar -tvf "$TAR" > "$LISTING_TMP"
+E54C_ROOTFS_TAR="$(readlink -f "$TAR")"
+export E54C_ROOTFS_TAR
+export E54C_ROOTFS_LISTING="$LISTING_TMP"
+export E54C_TEST_LIB="$TOP/scripts/test-lib.sh"
+# shellcheck source=test-lib.sh
+source "$E54C_TEST_LIB"
+listing="$(cat "$LISTING_TMP")"
 
 # --- ネットワーク (初回起動で SSH 到達できること) ---
-# enable 判定はフルパス + symlink 種別 + リンク先まで厳密に照合する。
-# パス末尾だけの照合だと var/lib/systemd/deb-systemd-helper-enabled/ 配下の
-# metadata に誤一致し、本命の /etc/systemd/system/ の symlink 欠落を見逃す
-enabled() { # <説明> <wants 配下の相対パス> <リンク先ユニット>
-	check "$1" "^l.* \\./etc/systemd/system/$2 -> /usr/lib/systemd/system/$3\$"
-}
 enabled "systemd-networkd が enable"        'multi-user\.target\.wants/systemd-networkd\.service' 'systemd-networkd\.service'
 enabled "systemd-networkd.socket が enable" 'sockets\.target\.wants/systemd-networkd\.socket'     'systemd-networkd\.socket'
 enabled "systemd-resolved が enable"        'sysinit\.target\.wants/systemd-resolved\.service'    'systemd-resolved\.service'
-enabled "ssh が enable"                     'multi-user\.target\.wants/ssh\.service'              'ssh\.service'
-# SSH: ホスト鍵は焼き込み禁止 (全端末で同一鍵になる)。初回起動時の生成は
-# trixie 標準の sshd-keygen.service (ConditionFirstBoot) に任せている
-check_absent "SSH ホスト鍵が焼き込まれていない" '\./etc/ssh/ssh_host_'
-check "sshd-keygen.service が ssh.service に配線" \
-	'^l.* \./etc/systemd/system/ssh\.service\.wants/sshd-keygen\.service -> /usr/lib/systemd/system/sshd-keygen\.service$'
-check "sshd 設定 (PasswordAuthentication 切替用)" '^-.* \./etc/ssh/sshd_config\.d/10-e54c-server\.conf$'
-# 成果物の要件は「debian/debian で SSH ログインできる」なので yes を要求する
-# (no への切替は各端末上で行う想定。ビルド段階で no になっていたら
-#  ログイン手段を失った成果物なので落とす)
-if tar -xOf "$TAR" ./etc/ssh/sshd_config.d/10-e54c-server.conf 2> /dev/null \
-	| grep -qE '^PasswordAuthentication yes$'; then
-	echo "ok: sshd がパスワード認証を受け付ける (PasswordAuthentication yes)"
-else
-	echo "NG: PasswordAuthentication yes が無い (成果物にログイン手段が無い)"
-	fail=1
-fi
+# (SSH 関連の検査は modules/ssh/tests/rootfs.sh に移行済み)
 # デフォルトユーザー: 存在 + ロックされていない (shadow がハッシュ) + sudo 所属
 if tar -xOf "$TAR" ./etc/passwd 2> /dev/null | grep -qE '^debian:x:[0-9]+:[0-9]+:.*:/home/debian:/bin/bash$'; then
 	echo "ok: debian ユーザーが存在"
@@ -227,6 +198,25 @@ if [[ -n $apt_residue ]]; then
 else
 	echo "ok: apt lists に index の残骸が無い"
 fi
+
+# --- モジュールの rootfs test (core 検査の後、辞書順、各テストは独立プロセス) ---
+# モジュールテストは追加のみ可能で、core invariant を無効化できない
+# (fail は集約のみ。resolver の検証失敗もここで fail-fast する)
+module_tests="$(python3 scripts/resolve-modules.py --json | python3 -c "
+import json, sys
+for m in json.load(sys.stdin):
+    for t in m['tests'].get('rootfs', []):
+        print(f\"{m['id']}\t{t}\")")"
+while IFS=$'\t' read -r mid t; do
+	[[ -n $mid ]] || continue
+	echo "module[$mid] rootfs test: ${t#"$TOP"/}"
+	if E54C_MODULE_ID="$mid" "$t" 2>&1 | sed "s/^/module[$mid] /"; then
+		:
+	else
+		echo "NG: module[$mid] の rootfs test が失敗 (${t#"$TOP"/})"
+		fail=1
+	fi
+done <<< "$module_tests"
 
 if ((fail)); then
 	echo "smoke test: FAILED" >&2

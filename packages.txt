@@ -22,8 +22,8 @@ iproute2
 tcpdump
 
 # --- システム基本 ---
+# (openssh-server は modules/ssh が導入する)
 systemd-timesyncd
-openssh-server
 ca-certificates
 curl
 gnupg

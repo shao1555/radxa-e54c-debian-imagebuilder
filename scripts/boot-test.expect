@@ -1,9 +1,10 @@
 #!/usr/bin/expect -f
 # SPDX-License-Identifier: GPL-2.0-only
 # QEMU 上でイメージをブートし、シリアルコンソール経由でログイン
-# (debian/debian → 初回パスワード変更の強制も通す) して boot-check.sh を実行し、
-# 最後にホスト側から実際の SSH ログイン (hostfwd 経由) を検証する。
-# 引数: <イメージ (raw)> <ゲスト内検査スクリプト> <SSH 転送ポート>
+# (debian/debian → 初回パスワード変更の強制も通す) して boot テスト bundle
+# (core + module tests + dispatcher の tar) を実行し、最後にホスト側から
+# 実際の SSH ログイン (hostfwd 経由) を検証する。
+# 引数: <イメージ (raw)> <boot テスト bundle (tar)> <SSH 転送ポート>
 
 set timeout 900
 set img [lindex $argv 0]
@@ -89,7 +90,7 @@ expect {
     timeout { puts "\nBOOTTEST: NG - sudo で root になれない"; exit 1 }
 }
 
-# --- 検査スクリプトをシリアル経由で転送して実行 ---
+# --- boot テスト bundle (tar) をシリアル経由で転送して実行 ---
 # ここからはプロンプト ("# $") 照合を使わない: readline がコマンドラインを
 # 再描画するとプロンプト断片がエコーに混ざり、誤一致で入力が先走る (実際に
 # 踏んだ)。エコー自体を止め、コマンドの完了は一意なセンチネル出力で同期する。
@@ -102,26 +103,30 @@ expect {
 }
 # 対話 bash はヒアドキュメントの行も readline で読むため、素のまま送ると
 # TAB インデントが補完動作に化けて内容が壊れる。base64 で転送する
+# (tar のバイナリもそのまま扱える)
 set f [open $chk r]
 fconfigure $f -translation binary
 set chk_data [read $f]
 close $f
-send "base64 -d > /tmp/boot-check.sh << 'EOF_BOOTCHECK'\r"
+send "base64 -d > /tmp/boot-tests.tar << 'EOF_BOOTCHECK'\r"
 foreach line [split [binary encode base64 -maxlen 76 $chk_data] "\n"] {
     send -- "$line\r"
 }
 send "EOF_BOOTCHECK\r"
-send "echo SYNC_\"2\"\r"
+send "mkdir -p /tmp/boot-tests && tar -xf /tmp/boot-tests.tar -C /tmp/boot-tests && echo SYNC_\"2\"\r"
 expect {
     -ex "SYNC_2" {}
-    timeout { puts "\nBOOTTEST: NG - 検査スクリプトの転送が完了しなかった"; exit 1 }
+    timeout { puts "\nBOOTTEST: NG - 検査 bundle の転送・展開が完了しなかった"; exit 1 }
 }
 
 set timeout 600
-send "sh /tmp/boot-check.sh; echo CHK_\"DONE\"\r"
+send "/tmp/boot-tests/run.sh; echo CHK_\"DONE\"\r"
 set result -1
 expect {
-    -re {BOOTTEST_RESULT=(\d)} {
+    -re {[\r\n]BOOTTEST_RESULT=(\d)} {
+        # 行頭アンカー: モジュール出力は dispatcher が "module[id] " を前置する
+        # ため、モジュールが BOOTTEST_RESULT を出力しても行頭には現れない
+        # (最終結果の偽装防止)
         set result $expect_out(1,string)
     }
     -ex "CHK_DONE" { puts "\nBOOTTEST: NG - 検査スクリプトが結果を出さず終了した"; exit 1 }
