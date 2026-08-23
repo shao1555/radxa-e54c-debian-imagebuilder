@@ -27,6 +27,10 @@ jobs:
       packages: write
     outputs:
       image: ${{ steps.tag.outputs.image }}
+      # base_config=debian の seed (linux-config パッケージ) の識別子。
+      # kernel ジョブがキャッシュキーに使う (kernel ジョブでのイメージ pull を
+      # 避けるため、イメージを手元に持つこのジョブで取得する)
+      seed: ${{ steps.seed.outputs.seed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -44,15 +48,34 @@ jobs:
           tag="$(TZ=Asia/Tokyo date +%Y%m%d)-${hash:0:12}-${{ runner.arch }}"
           echo "image=${DEVCONTAINER_IMAGE}:${tag}" >> "$GITHUB_OUTPUT"
 
+      # seed (linux-config パッケージのバージョン) はイメージの LABEL に焼き込む。
+      # 既存イメージの経路では imagetools inspect が manifest + config blob (数 KB)
+      # だけを読むため、レイヤーの pull は発生しない (= キャッシュヒット時の
+      # workflow 全体が高速のまま)。LABEL の無い過去イメージには docker run で
+      # フォールバックする (1 回だけ pull が走り、翌日のローテで自然に解消)
       - name: Build and push if missing
+        id: seed
         run: |
           img="${{ steps.tag.outputs.image }}"
           if docker manifest inspect "$img" > /dev/null 2>&1; then
             echo "==> $img exists, skipping build"
+            seed="$(docker buildx imagetools inspect "$img" \
+              --format '{{ index .Image.Config.Labels "e54c.kernel-config-seed" }}')"
+            if [[ -z $seed ]]; then
+              echo "==> no seed label (old image), falling back to docker run"
+              seed="$(docker run --rm "$img" \
+                dpkg-query -W -f '${Package}=${Version}' 'linux-config-*')"
+            fi
           else
             docker build -t "$img" .devcontainer/
+            seed="$(docker run --rm "$img" \
+              dpkg-query -W -f '${Package}=${Version}' 'linux-config-*')"
+            # レイヤーは全てキャッシュ済みのため、LABEL 付け直しは数秒で終わる
+            docker build --label "e54c.kernel-config-seed=$seed" -t "$img" .devcontainer/
             docker push "$img"
           fi
+          [[ -n $seed ]] || { echo "エラー: seed バージョンを取得できない" >&2; exit 1; }
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
 
   # ステージ 1: カーネル deb。入力が変わらなければキャッシュ復元だけで数秒
   kernel:
@@ -60,15 +83,35 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       packages: read
+    outputs:
+      # rootfs ジョブがキャッシュキーに含める (新 seed で kernel deb が変わった
+      # のに rootfs が同日分の旧キャッシュにヒットして古いカーネル入り rootfs を
+      # リリースするのを防ぐ)
+      debs-key: ${{ steps.key.outputs.key }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # キャッシュキーの構成要素:
+      # - config.yaml は kernel セクションのみハッシュする (hostname 等の変更で
+      #   63 分のカーネル再ビルドが走るのを防ぐ)
+      # - base_config=debian の seed (devcontainer 内の linux-config パッケージ)
+      #   のバージョンを含める (seed 更新の取りこぼしと、キャッシュ消失時に
+      #   同一コミットから異なるカーネルが出るのを防ぐ)。値は devcontainer
+      #   ジョブが出力する (このジョブでイメージを pull しないため、
+      #   キャッシュヒット時は数秒で終わる性質を保つ)
+      - name: Compute kernel cache key
+        id: key
+        run: |
+          python3 -c "import yaml" 2> /dev/null || pip install --quiet PyYAML
+          ksec="$(python3 -c "import yaml, json, hashlib; k = yaml.safe_load(open('config.yaml'))['kernel']; print(hashlib.sha256(json.dumps(k, sort_keys=True).encode()).hexdigest()[:16])")"
+          echo "key=kernel-debs-${{ runner.arch }}-${ksec}-${{ needs.devcontainer.outputs.seed }}-${{ hashFiles('kernel/**', 'scripts/build-kernel.sh') }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore kernel debs
         id: debs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: out/debs
-          key: kernel-debs-${{ runner.arch }}-${{ hashFiles('config.yaml', 'kernel/**', 'scripts/build-kernel.sh') }}
+          key: ${{ steps.key.outputs.key }}
 
       - name: Restore ccache
         if: steps.debs.outputs.cache-hit != 'true'
@@ -124,8 +167,10 @@ jobs:
         with:
           path: out/rootfs
           # workflow 自体もキーに含める (DEFAULT_PASSWORD 等、この場で決まる
-          # 入力の変更で古い rootfs キャッシュが再利用されるのを防ぐ)
-          key: rootfs-${{ runner.arch }}-${{ steps.date.outputs.date }}-${{ hashFiles('config.yaml', 'packages.txt', 'files/**', 'hooks/**', 'kernel/**', 'scripts/build-kernel.sh', 'scripts/build-rootfs.sh', 'scripts/render-bdebstrap.py', '.github/workflows/release.yml') }}
+          # 入力の変更で古い rootfs キャッシュが再利用されるのを防ぐ)。
+          # kernel deb のキー (seed 含む) と devcontainer イメージ識別子も含め、
+          # カーネルやビルド環境が変わったのに旧 rootfs を再利用しないようにする
+          key: rootfs-${{ runner.arch }}-${{ steps.date.outputs.date }}-${{ needs.kernel.outputs.debs-key }}-${{ needs.devcontainer.outputs.image }}-${{ hashFiles('config.yaml', 'packages.txt', 'files/**', 'hooks/**', 'scripts/build-rootfs.sh', 'scripts/render-bdebstrap.py', '.github/workflows/release.yml') }}
 
       - name: Download kernel debs
         if: steps.rootfs.outputs.cache-hit != 'true'
@@ -153,9 +198,12 @@ jobs:
             "${{ needs.devcontainer.outputs.image }}" scripts/build-rootfs.sh
 
       # キャッシュ復元・新規ビルドのどちらの経路でも回帰検査を通す
-      # (tar の listing 検査のみなのでコンテナ不要)
+      # (tar listing + initrd 内部検査。lsinitramfs が必要)
       - name: Smoke test rootfs
-        run: scripts/smoke-test-rootfs.sh
+        run: |
+          command -v lsinitramfs > /dev/null || \
+            sudo apt-get install -y --no-install-recommends initramfs-tools-core
+          scripts/smoke-test-rootfs.sh
 
       - name: Upload rootfs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
