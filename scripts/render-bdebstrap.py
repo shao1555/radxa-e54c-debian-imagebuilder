@@ -104,25 +104,15 @@ customize_hooks = [
     # hostname
     f'echo "{cfg["image"]["hostname"]}" > "$1/etc/hostname"',
     f'echo "127.0.1.1\t{cfg["image"]["hostname"]}" >> "$1/etc/hosts"',
-    # 自作フック (chroot 外から $1 を渡して実行)
-    f'for h in "{TOP}"/hooks/customize.d/*.sh; do [ -e "$h" ] && bash "$h" "$1"; done',
-    # デフォルトユーザーの作成。パスワードは bdebstrap.yaml (リリースに同梱される)
-    # に値を埋め込まず、フック実行時の環境変数 $DEFAULT_PASSWORD を参照する
-    # (build-rootfs.sh が未設定を検知して早期に失敗させる)
-    'chroot "$1" useradd -m -s /bin/bash -G sudo debian',
-    # dash の echo は \n 等を解釈してしまうため、固定書式の printf を使う
-    # (CR/LF を含む値は build-rootfs.sh が事前拒否する)
-    'printf \'%s:%s\\n\' debian "$DEFAULT_PASSWORD" | chroot "$1" chpasswd',
-    # 初期パスワードは周知の値 (リリースでは debian) のため、初回ログイン時に
-    # 変更を強制して既知パスワードのまま運用され続けるのを防ぐ
-    'chroot "$1" chage -d 0 debian',
-    # SSH ホスト鍵の初回起動生成は trixie 標準の sshd-keygen.service に任せる
-    # (ConditionFirstBoot=yes。machine-id を cleanup で消すため初回起動で発動する。
-    #  独自 unit を足すと並列実行の競合になるため追加してはいけない)
-    # systemd-networkd の有効化。Debian は既定で enable しないため、
-    # files/etc/systemd/network/*.network はこれが無いと一切機能しない
-    # (= 初回起動時に lan1 が DHCP せず SSH 到達不能になる)
-    'chroot "$1" systemctl enable systemd-networkd.service systemd-networkd.socket',
+    # legacy フック (chroot 外から $1 を渡して実行。機能はモジュールへ移行済みで
+    # 現在は空。未移行機能の受け皿として仕組みは残す)。
+    # glob 不一致時に `[ -e ] &&` が偽のままループを抜けると exit 1 になり
+    # mmdebstrap がフック失敗と誤認するため、continue で受ける (実際に踏んだ)
+    f'for h in "{TOP}"/hooks/customize.d/*.sh; do [ -e "$h" ] || continue; bash "$h" "$1"; done',
+    # (デフォルトユーザー作成は modules/default-user、networkd の有効化は
+    #  modules/networkd の hook に移行済み。SSH ホスト鍵の初回起動生成は
+    #  trixie 標準の sshd-keygen.service に任せる: ConditionFirstBoot=yes。
+    #  machine-id を cleanup で消すため初回起動で発動する)
     # ブート用カーネル引数。root= は build-image.sh がイメージ作成時に UUID を注入する。
     # u-boot-update が /etc/kernel/cmdline を参照するよう /etc/default/u-boot を配線して
     # おくことで、実機での以後のカーネル更新でも root= が維持される
@@ -178,10 +168,8 @@ config = {
         "aptopts": ['Acquire::Check-Valid-Until "false"'],
         "components": deb["components"],
         "packages": [
-            # login: trixie では Essential でなくなり variant=apt に含まれない。
-            # 無いと agetty が login(1) を exec できず、シリアルコンソールから
-            # 一切ログインできなくなる (QEMU ブートテストで検出)
-            "init", "sudo", "login", "systemd-boot", "initramfs-tools", "zstd",
+            # (login / sudo は modules/default-user が導入する)
+            "init", "systemd-boot", "initramfs-tools", "zstd",
             "u-boot-menu",  # u-boot-update (extlinux.conf 生成)
             # radxa の keyring / U-Boot は apt 解決しない (dependencies.lock.yaml
             # で固定した deb を customize hook が dpkg で投入する)
@@ -205,13 +193,12 @@ config = {
             f'> "$1/etc/apt/sources.list.d/50-{suite}-updates.list"',
             f'echo "deb {live_sec} {suite}-security {components}" '
             f'> "$1/etc/apt/sources.list.d/50-{suite}-security.list"',
-            # ビルドホストの DNS 設定 (mmdebstrap が入れる resolv.conf と、
-            # systemd-resolved postinst が退避した .bak) を除去し、resolved の
-            # stub への symlink に置き換える。単に削除するだけだと初回起動時に
-            # glibc が /etc/resolv.conf を見つけられず DNS 解決が壊れる
-            # (SSH ホスト鍵の除去は modules/ssh の rootfs.seal hook に移行済み)
-            'rm -f "$1/etc/resolv.conf" "$1/etc/.resolv.conf.systemd-resolved.bak"',
-            'ln -s ../run/systemd/resolve/stub-resolv.conf "$1/etc/resolv.conf"',
+            # resolv.conf の安全 invariant: ビルドホスト由来の regular file と
+            # .bak の漏洩を拒否する。symlink 判定を優先し (dangling も保持)、
+            # モジュール (systemd-resolved の rootfs.seal) が張った symlink は
+            # 上書きしない。最終ポリシー (stub symlink) はモジュールが所有する
+            '[ -L "$1/etc/resolv.conf" ] || rm -f "$1/etc/resolv.conf"',
+            'rm -f "$1/etc/.resolv.conf.systemd-resolved.bak"',
             'rm -rf "$1/var/lib/apt/lists"/*',
             'rm -f "$1/etc/machine-id" "$1/var/lib/dbus/machine-id"',
         ],

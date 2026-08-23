@@ -15,11 +15,12 @@ Radxa E54C 用の軽量サーバー OS(Debian ベース、GUI レス、incus/LXC
 | 場所 | 役割 |
 |---|---|
 | [config.yaml](config.yaml) | **ベースの Debian(suite/mirror)とカーネル(バージョン/localversion)の指定**、U-Boot の供給元 |
-| [packages.txt](packages.txt) | **追加 deb パッケージ**(1 行 1 個、# コメント可、`pkg/suite-backports` 形式可) |
-| [files/](files/) | **rootfs にそのまま重ねる overlay**(`files/etc/...` → `/etc/...`) |
+| [modules/](modules/) | **機能単位のモジュール**(パッケージ・overlay・build hook・テストを一式で所有)。契約は [docs/modules.md](docs/modules.md) を参照。ssh / default-user / networkd / systemd-resolved / container-host / incus / k3s が組み込み済み |
+| [packages.txt](packages.txt) | **base runtime の追加 deb パッケージ**(1 行 1 個、# コメント可。機能単位の追加はモジュール側の `packages.apt` へ) |
 | [kernel/](kernel/) | **カーネルのカスタマイズ**: `patches/`(昇順 apply)、`config/`(defconfig への fragment)、`dts/`(in-tree に無い場合のみ投入 → 上流化されたら自動で無効) |
 
-`hooks/customize.d/*.sh` に chroot への任意処理を書ける(k3s の静的バイナリ導入が実例)。
+未移行機能の受け皿として `files/`(core overlay)と `hooks/customize.d/*.sh`
+(legacy hook)の仕組みも残っているが、新しい機能はモジュールとして書くこと。
 
 ## ローカルビルド(devcontainer)
 
@@ -46,41 +47,41 @@ npm exec -- @devcontainers/cli exec --workspace-folder . make
 ## ビルドの流れ(make / CI が実行)
 
 ```
-1. scripts/build-kernel.sh   kernel.org から取得 → patches/dts/config 適用
-                             → クロスビルドで linux-image/headers の deb 生成
-2. scripts/build-rootfs.sh   config.yaml + packages.txt → bdebstrap 設定を生成
-                             → mmdebstrap で Debian rootfs 構築(QEMU binfmt)
-                             → 自前カーネル deb 投入 → files/ overlay → hooks 実行
+1. scripts/build-kernel.sh   kernel.org から取得 (lock の SHA256 検証)
+                             → patches/dts/config 適用 → linux-image/headers の deb 生成
+2. scripts/build-rootfs.sh   modules/ を解決・検証 → config.yaml + packages.txt +
+                             modules/*/module.yaml → bdebstrap 設定を生成
+                             → mmdebstrap で Debian rootfs 構築 (snapshot 固定)
+                             → 自前カーネル deb + Radxa deb (lock 検証済み) 投入
+                             → core/module overlay → legacy hooks
+                             → module rootfs.customize → initramfs/extlinux 生成
+                             → module rootfs.seal → core final seal
 3. scripts/build-image.sh    guestfish で GPT イメージ化(config/ESP/rootfs の
                              Radxa 互換レイアウト)→ 縮小 → U-Boot 書き込み → xz
 ```
 
 main への push で CalVer タグ(`vYYYY.MM.DD-HHMM`、JST)の Release に
-イメージ・SHA512・manifest・bdebstrap.yaml(ビルドの完全な記録)が公開される。
+イメージ・SHA512・manifest・bdebstrap.yaml・dependencies.lock.yaml・
+resolved-modules.yaml・provenance.yaml(ビルドの完全な記録)が公開される。
 
-CI は **devcontainer / kernel / rootfs / image / release の 5 ジョブ**のパイプライン
-(artifact 転送は実測で十分速いため、ステージごとにキャッシュ・リトライできる粒度に分割):
+CI は **devcontainer (arm64/amd64) / kernel / rootfs / image / boot-test / release の
+7 ジョブ**のパイプライン(ステージごとにキャッシュ・リトライできる粒度に分割):
 
-- **devcontainer**: ビルド環境イメージを「日付 + .devcontainer 内容ハッシュ」のタグで
-  GHCR に構築。同タグが存在すればビルドせず再利用(日次ローテ)。
+- **devcontainer**: ビルド環境イメージを .devcontainer の内容ハッシュのタグで GHCR に
+  構築(digest 固定ベース + APT snapshot 固定なので、同じ内容なら再利用し続ける)。
   下流ジョブはこのタグを **plain `docker run` するだけ**で、イメージ構築を行わない
-- **kernel**: 入力(config.yaml / kernel/ / build script)のハッシュでキャッシュされ、
-  変更が無ければ数秒でスキップ。ミス時も ccache で再コンパイルを短縮
-- **rootfs**: 入力ハッシュ + **日付**でキャッシュ(日次ローテ)。同日の再 push は
-  スキップされるが、翌日は必ず fresh な apt 状態で作り直す
-  (永続キャッシュにすると Debian のセキュリティ更新が取り込まれなくなるため)。
-  ビルド・キャッシュ復元のどちらの経路でも **smoke test**
-  (`scripts/smoke-test-rootfs.sh`、networkd/resolved の enable・resolv.conf・
-  SSH ホスト鍵不在・ログイン可能性・カーネル/DTB/extlinux・incus/k3s 等)が走る。
-  ローカルは `make check`
-- **image**: guestfish によるイメージ組み立て(rootfs.tar のみを入力に取る)。
-  このジョブだけ **x64 ランナー**: GitHub の x64 は KVM が使えるため、libguestfs の
-  アプライアンスが TCG(arm64 ランナー)より大幅に速い。アプライアンスの仕事は
-  ファイルシステム操作のみなので、x86_64 アプライアンスで arm64 イメージを扱える
-- **release**: リリース作成のみの最小権限ジョブ。ここだけの失敗は re-run で復旧可
-- 権限も最小化: GHCR へ push するのは devcontainer ジョブのみ(packages: write)。
-  下流は pull のみ(packages: read)、release は contents: write のみ
-- action はサプライチェーン対策として**コミット SHA で固定**(コメントが参照バージョン)
+- **kernel**: 入力(config.yaml の kernel セクション / kernel/ / lock / seed)の
+  ハッシュでキャッシュされ、変更が無ければ数秒でスキップ。ミス時も ccache で短縮
+- **rootfs**: 入力の content hash でキャッシュ(セキュリティ更新は週次の snapshot
+  更新 PR で取り込む)。どちらの経路でも **smoke test**(framework invariant +
+  各モジュールの rootfs test)が走る。PR では再現性検証(二重ビルドの manifest
+  一致)も行う。ローカルは `make check`
+- **image / boot-test**: snapshot 固定済みの amd64 devcontainer 内で実行
+  (x64 ランナーは KVM が使えるため libguestfs が速い)。boot-test は QEMU で
+  実ブートし、シリアルログイン → core + 全モジュールの boot test → 実 SSH ログイン
+- **release**: main への push のみ。リリース作成だけの最小権限ジョブ
+- 権限は最小化(workflow 既定 contents: read、GHCR push は devcontainer のみ)。
+  action はサプライチェーン対策として**コミット SHA で固定**
 
 ## ログイン
 

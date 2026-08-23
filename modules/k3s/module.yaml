@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-2.0-only
+apiVersion: e54c.image/v1alpha1
+kind: Module
+
+metadata:
+  id: k3s
+  description: k3s (軽量 Kubernetes)。導入済みだが既定では無効
+
+overlays:
+  # systemd preset: 初回ブートの preset-all (Debian 既定 enable *) が
+  # k3s.service を勝手に enable して crash-loop する回帰を実際に踏んだため、
+  # disable を preset で固定する
+  - source: files
+    target: /
+
+hooks:
+  # lock 済み URL/SHA256 からの取得・検証、バイナリ配置、k3s.service の作成
+  rootfs.customize:
+    - hooks/install-k3s.sh
+
+tests:
+  rootfs:
+    - tests/rootfs.sh
+  boot:
+    - tests/boot.sh

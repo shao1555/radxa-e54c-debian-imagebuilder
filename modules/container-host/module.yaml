@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only
+apiVersion: e54c.image/v1alpha1
+kind: Module
+
+metadata:
+  id: container-host
+  description: incus / k3s が共有するコンテナホスト基盤 (nftables・sysctl・kernel 前提)
+
+packages:
+  apt:
+    # OpenWrt コンテナの firewall4 はホストの nft モジュールを使う
+    - nftables
+
+overlays:
+  # IPv4/IPv6 forwarding、inotify、key quota、vm.max_map_count
+  - source: files
+    target: /
+
+tests:
+  rootfs:
+    - tests/rootfs.sh
+  boot:
+    - tests/boot.sh

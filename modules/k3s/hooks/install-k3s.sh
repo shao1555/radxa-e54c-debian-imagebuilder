@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 # k3s を静的バイナリとして導入する (deb が存在しないため)。
-# $1 = rootfs のパス (bdebstrap の customize-hook から渡される)
+# $1 = rootfs のパス (module rootfs.customize hook)
 set -euo pipefail
 ROOT="$1"
 
@@ -9,7 +9,7 @@ ROOT="$1"
 # 必ずペアで更新する (renovate 等での自動更新を想定)。
 # SHA256 は https://github.com/k3s-io/k3s/releases の sha256sum-arm64.txt に
 # 記載の k3s-arm64 の値。検証はスキップ不可: 取得できなければビルドを失敗させる
-TOP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TOP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 K3S_URL="$(python3 "$TOP/scripts/lock-get.py" k3s.url)"
 K3S_SHA256="$(python3 "$TOP/scripts/lock-get.py" k3s.sha256)"
 

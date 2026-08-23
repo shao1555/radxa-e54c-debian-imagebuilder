@@ -100,6 +100,21 @@ rootfs 生成の全体順序:
 - hook には **rootfs のパス (tar 化前の展開済みディレクトリ) が第 1 引数**として
   渡され、builder 上 (chroot 外) で実行される。tar 化後の再展開は行われない
 
+### secret input (限定契約)
+
+hook が参照できる環境変数は、契約に明記されたものだけである。
+偶然継承された環境変数はモジュール API ではなく、依存してはならない。
+
+| 変数 | 渡し先 | 内容 |
+|---|---|---|
+| `DEFAULT_PASSWORD` | 組み込み `default-user` モジュールのみ | 既定ユーザーの初期パスワード |
+
+- `DEFAULT_PASSWORD` は `default-user` が解決対象に含まれる場合だけ
+  build-rootfs.sh が必須検証する (モジュールを外せば framework は要求しない)
+- 値をログ、生成 YAML (bdebstrap.yaml)、`resolved-modules.yaml` に出力しない
+- 外部モジュール導入時には、モジュールごとの入力宣言と環境の sanitize を
+  別途設計する (それまで新しい環境変数契約は追加しない)
+
 | phase | 実行場所 | MVP |
 |---|---|---|
 | `rootfs.customize` | boot finalize 前。rootfs path を引数に builder 上で実行 | 対応 |

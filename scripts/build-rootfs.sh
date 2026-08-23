@@ -22,22 +22,9 @@ if [[ -f "$TOP/.env" ]]; then
 	source "$TOP/.env"
 fi
 
-# デフォルトユーザー (debian) のパスワード。値は bdebstrap.yaml に埋め込まれず、
-# フック実行時にこの環境変数から読まれる (リリース同梱の yaml に漏れない)
-if [[ -z "${DEFAULT_PASSWORD:-}" ]]; then
-	cat >&2 <<- 'EOF'
-	エラー: DEFAULT_PASSWORD が未設定です。
-	  ローカルビルド: cp .env.example .env して DEFAULT_PASSWORD を設定してください
-	  (CI は workflow が DEFAULT_PASSWORD=debian を設定します)
-	EOF
-	exit 1
-fi
-# chpasswd は行区切りで解釈するため、CR/LF を含む値は事故のもとなので拒否する
-if [[ "$DEFAULT_PASSWORD" == *$'\n'* || "$DEFAULT_PASSWORD" == *$'\r'* ]]; then
-	echo "エラー: DEFAULT_PASSWORD に改行 (CR/LF) を含めることはできません" >&2
-	exit 1
-fi
-export DEFAULT_PASSWORD
+# (DEFAULT_PASSWORD の検証はモジュール解決後に行う: default-user モジュールが
+#  解決対象に含まれる場合だけ必須とする。将来モジュールを無効化しても
+#  framework が不要な secret を要求し続けないための境界)
 
 # カーネル deb と E54C の DTB の存在を事前検証する。無いまま進めると
 # 「正常に生成されたが起動不能な rootfs」ができてしまう。
@@ -71,7 +58,29 @@ scripts/verify-build-env.sh
 # モジュールの解決 (検証込みの fail-fast) と provenance の生成。
 # render-bdebstrap.py も同じ resolver を使って packages / overlay / hook を配線する
 mkdir -p "$TOP/out/meta"
-python3 scripts/resolve-modules.py --resolved "$TOP/out/meta/resolved-modules.yaml"
+resolved_ids="$(python3 scripts/resolve-modules.py \
+	--resolved "$TOP/out/meta/resolved-modules.yaml" --json \
+	| python3 -c "import json, sys; print('\n'.join(m['id'] for m in json.load(sys.stdin)))")"
+
+# DEFAULT_PASSWORD は default-user モジュールへの明示的な secret input。
+# モジュールが解決対象に含まれる場合だけ必須検証する (値はログ・生成 YAML・
+# resolved-modules.yaml に出力しない)
+if grep -qx "default-user" <<< "$resolved_ids"; then
+	if [[ -z "${DEFAULT_PASSWORD:-}" ]]; then
+		cat >&2 <<- 'EOF'
+		エラー: DEFAULT_PASSWORD が未設定です (default-user モジュールの必須 secret)。
+		  ローカルビルド: cp .env.example .env して DEFAULT_PASSWORD を設定してください
+		  (CI は workflow が DEFAULT_PASSWORD=debian を設定します)
+		EOF
+		exit 1
+	fi
+	# chpasswd は行区切りで解釈するため、CR/LF を含む値は事故のもとなので拒否する
+	if [[ "$DEFAULT_PASSWORD" == *$'\n'* || "$DEFAULT_PASSWORD" == *$'\r'* ]]; then
+		echo "エラー: DEFAULT_PASSWORD に改行 (CR/LF) を含めることはできません" >&2
+		exit 1
+	fi
+	export DEFAULT_PASSWORD
+fi
 
 python3 scripts/render-bdebstrap.py "$OUT"
 
