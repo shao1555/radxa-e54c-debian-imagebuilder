@@ -222,6 +222,9 @@ jobs:
       - name: Resolver tests and resolve module plan
         id: plan
         run: |
+          # コンテナ内 root が out/ を作るとランナー側の後続ステップ
+          # (artifact download 等) が書き込めなくなるため、先にランナー所有で作る
+          mkdir -p out/meta out/debs
           docker run --rm -v "$PWD":/ws -w /ws \
             "${{ needs.devcontainer.outputs.image }}" bash -c '
             python3 scripts/tests/test_resolver.py &&
