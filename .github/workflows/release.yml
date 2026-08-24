@@ -309,9 +309,20 @@ jobs:
           {
             echo "## rootfs manifest diff (最新リリース → この PR)"
             if gh release download --repo "$GITHUB_REPOSITORY" --pattern manifest -O /tmp/release-manifest 2> /dev/null; then
-              echo '```diff'
-              diff -u /tmp/release-manifest out/rootfs/build/manifest || true
-              echo '```'
+              # 差分ゼロのとき空のコードブロックを出すと「summary が壊れている」
+              # ように見えるため、状態を明示する (diff の exit: 0=同一, 1=差分,
+              # それ以外=エラー。エラーを差分ゼロと混同しない)
+              rc=0
+              diff -u /tmp/release-manifest out/rootfs/build/manifest > /tmp/manifest.diff || rc=$?
+              if [ "$rc" -eq 0 ]; then
+                echo "パッケージの差分なし (rootfs manifest は最新リリースと同一)"
+              elif [ "$rc" -eq 1 ]; then
+                echo '```diff'
+                cat /tmp/manifest.diff
+                echo '```'
+              else
+                echo "(diff の実行に失敗: exit $rc。manifest の生成有無を確認)"
+              fi
             else
               echo "(比較対象のリリース manifest が見つからない)"
             fi
