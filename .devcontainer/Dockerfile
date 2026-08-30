@@ -11,8 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # APT を snapshot.debian.org の固定タイムスタンプに向ける
 # (dependencies.lock.yaml の debian.snapshot / security_snapshot と一致させること)
 ARG BASE_IMAGE
-ARG DEBIAN_SNAPSHOT=20260823T203331Z
-ARG DEBIAN_SECURITY_SNAPSHOT=20260823T181421Z
+ARG DEBIAN_SNAPSHOT=20260830T202651Z
+ARG DEBIAN_SECURITY_SNAPSHOT=20260830T191451Z
 # ベースイメージには ca-certificates が無く https を検証できないため、
 # 最初の 1 手だけ http で ca-certificates を入れる (apt の GPG 署名で完全性は
 # 検証される)。以後は https に切り替え、リプレイ/MITM 耐性を持たせる
