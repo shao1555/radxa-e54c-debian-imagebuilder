@@ -12,8 +12,8 @@ debian:
   # 配備後の security update は妨げない。
   # .devcontainer/Dockerfile のハードコード値と一致していること
   # (scripts/verify-build-env.sh がビルド時に照合する)
-  snapshot: "20260823T203331Z"
-  security_snapshot: "20260823T181421Z"
+  snapshot: "20260927T203404Z"
+  security_snapshot: "20260927T192304Z"
 
 devcontainer:
   # ビルド環境コンテナのベースイメージ (immutable digest で固定)。
